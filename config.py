@@ -24,6 +24,9 @@ class Config:
     inference_play_behavior_strength: float
     inference_behavior_temperature: float
     inference_min_effective_sample_ratio: float
+    risk_adjustment_enabled: bool
+    risk_adjustment_weight: float
+    risk_adjustment_min_ess_ratio: float
     
     def __init__(self, **kwargs) -> None:
         self.window_width = kwargs.get('window_width', 1600)
@@ -48,6 +51,9 @@ class Config:
         self.inference_play_behavior_strength = kwargs.get('inference_play_behavior_strength', 1.0)
         self.inference_behavior_temperature = kwargs.get('inference_behavior_temperature', 0.75)
         self.inference_min_effective_sample_ratio = kwargs.get('inference_min_effective_sample_ratio', 0.28)
+        self.risk_adjustment_enabled = kwargs.get('risk_adjustment_enabled', True)
+        self.risk_adjustment_weight = kwargs.get('risk_adjustment_weight', 0.30)
+        self.risk_adjustment_min_ess_ratio = kwargs.get('risk_adjustment_min_ess_ratio', 0.40)
     
     @classmethod
     def load(cls):
