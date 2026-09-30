@@ -206,6 +206,10 @@ class WorkerThread(QThread):
             "position_code": None,
         }
         wechat_other_hands_cards_str = ""
+        douzero_initial_data = None
+        douzero_players = None
+        douzero_history = []
+        douzero_paused_reason = None
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -281,7 +285,15 @@ class WorkerThread(QThread):
             expected_side = side_cycle[side]
             return True
 
+        def pause_douzero(reason):
+            nonlocal douzero_paused_reason
+            if douzero_paused_reason != reason:
+                print(f"DouZero建议暂停 >>> {reason}")
+            douzero_paused_reason = reason
+            self.ai_suggestion_signal.emit([("__PAUSED__", "-", "-")])
+
         def emit_douzero_suggestion_if_my_turn():
+            nonlocal douzero_paused_reason
             if self.env is None or self.env.game_over:
                 self.ai_suggestion_signal.emit([])
                 return
@@ -309,6 +321,7 @@ class WorkerThread(QThread):
 
                 self.action_list = enriched_actions
                 self.ai_suggestion_signal.emit(self.action_list)
+                douzero_paused_reason = None
 
                 action_text = action_message.get("action", "")
                 primary_risk = None
@@ -324,45 +337,65 @@ class WorkerThread(QThread):
                 if action_text:
                     print(
                         f"DouZero建议 >>> {display_cards(action_text)} "
-                        f"(评分 {action_message.get('win_rate', 0):.3f}{risk_suffix})"
+                        f"(模型分 {action_message.get('win_rate', 0):.3f}{risk_suffix})"
                     )
                 else:
                     print("DouZero建议 >>> 不出")
             except Exception as exc:
-                self.ai_suggestion_signal.emit([])
-                print(f"DouZero建议计算失败（不影响识牌/推牌）: {exc}")
+                pause_douzero(f"建议计算失败：{exc}")
 
-        def apply_action_to_douzero(player, cards):
-            if self.env is None:
-                return False
-            if self.env.game_over:
-                self.ai_suggestion_signal.emit([])
-                return False
+        def rebuild_douzero_from_history():
+            """Rebuild AI state from confirmed public history.
 
-            if self.env.acting_player_position != player:
-                print(
-                    "DouZero状态不同步 >>> "
-                    f"环境等待 {self.env.acting_player_position}，"
-                    f"识别到 {player}；本次不写入AI环境"
-                )
-                self.ai_suggestion_signal.emit([])
+            Recognition history is the source of truth.  GameEnv is disposable
+            derived state, so rebuilding prevents one transient mismatch from
+            poisoning all later suggestions.
+            """
+            nonlocal douzero_paused_reason
+            if douzero_players is None or douzero_initial_data is None:
+                pause_douzero("初始化数据尚未就绪")
                 return False
 
             try:
-                action_env = sorted(
-                    [RealCard2EnvCard[card] for card in cards]
-                )
-                self.env.step(player, action=action_env, update=True)
-                emit_douzero_suggestion_if_my_turn()
+                env = GameEnv(douzero_players)
+                init_data = {
+                    key: list(value)
+                    for key, value in douzero_initial_data.items()
+                }
+                env.card_play_init(init_data)
+
+                for hist_player, hist_cards in douzero_history:
+                    if env.game_over:
+                        break
+                    if env.acting_player_position != hist_player:
+                        pause_douzero(
+                            f"历史顺序不一致：环境等待 {env.acting_player_position}，"
+                            f"历史为 {hist_player}"
+                        )
+                        return False
+                    action_env = sorted(
+                        [RealCard2EnvCard[card] for card in hist_cards]
+                    )
+                    env.step(hist_player, action=action_env, update=True)
+
+                self.env = env
+                douzero_paused_reason = None
                 return True
             except Exception as exc:
-                self.ai_suggestion_signal.emit([])
-                print(f"DouZero状态更新失败（不影响识牌/推牌）: {exc}")
+                pause_douzero(f"历史重建失败：{exc}")
                 return False
+
+        def apply_action_to_douzero(player, cards):
+            douzero_history.append((player, cards))
+            if not rebuild_douzero_from_history():
+                return False
+            emit_douzero_suggestion_if_my_turn()
+            return True
 
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
+            nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
 
             self.my_hand_cards = my_hand
             self.three_cards = three_cards
@@ -389,16 +422,24 @@ class WorkerThread(QThread):
             self.other_hands_cards = []
             self.all_player_card_data = {}
             self.env = None
+            douzero_history.clear()
+            douzero_initial_data = None
+            douzero_players = None
+            douzero_paused_reason = None
             try:
                 self.initOtherPlayerHandCards()
                 self.initAllPlayerCardData()
                 self.create_ai_representer()
-                self.env.card_play_init(self.all_player_card_data)
-                print("DouZero只读建议环境已初始化")
+                douzero_players = self.env.players
+                douzero_initial_data = {
+                    key: list(value)
+                    for key, value in self.all_player_card_data.items()
+                }
+                if rebuild_douzero_from_history():
+                    print("DouZero只读建议环境已初始化（历史可重建）")
             except Exception as exc:
                 self.env = None
-                self.ai_suggestion_signal.emit([])
-                print(f"DouZero初始化失败（识牌/推牌继续运行）: {exc}")
+                pause_douzero(f"初始化失败：{exc}")
 
             landlord_side = landlord_start_side[position_code]
             for side in ("left", "right"):
