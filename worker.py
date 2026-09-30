@@ -294,14 +294,37 @@ class WorkerThread(QThread):
                     self.my_position, action=None, update=False
                 )
                 self.action_message = action_message
-                self.action_list = action_list[:3]
+
+                top_actions = action_list[:3]
+                enriched_actions = []
+                for action_text, score_text in top_actions:
+                    risk = None
+                    if self.hand_inference is not None and action_text != "Pass":
+                        try:
+                            risk = self.hand_inference.response_risk(action_text)
+                        except Exception as risk_exc:
+                            print(f"敌方可压概率计算失败: {risk_exc}")
+                    risk_text = "-" if risk is None else f"{risk:.0%}"
+                    enriched_actions.append((action_text, score_text, risk_text))
+
+                self.action_list = enriched_actions
                 self.ai_suggestion_signal.emit(self.action_list)
 
                 action_text = action_message.get("action", "")
+                primary_risk = None
+                if self.hand_inference is not None and action_text:
+                    try:
+                        primary_risk = self.hand_inference.response_risk(action_text)
+                    except Exception:
+                        primary_risk = None
+                risk_suffix = (
+                    "" if primary_risk is None
+                    else f"，敌方可压 {primary_risk:.0%}"
+                )
                 if action_text:
                     print(
                         f"DouZero建议 >>> {display_cards(action_text)} "
-                        f"(评分 {action_message.get('win_rate', 0):.3f})"
+                        f"(评分 {action_message.get('win_rate', 0):.3f}{risk_suffix})"
                     )
                 else:
                     print("DouZero建议 >>> 不出")
