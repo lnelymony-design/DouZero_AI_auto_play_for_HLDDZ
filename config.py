@@ -5,6 +5,9 @@ class Config:
     window_width: int
     window_height: int
     window_class_name: str
+    window_title: str
+    platform: str
+    resize_window: bool
     screenshot_image_logs: bool
     template_match_image_logs: bool
     animation_image_compare_logs: bool
@@ -19,6 +22,9 @@ class Config:
         self.window_width = kwargs.get('window_width', 1600)
         self.window_height = kwargs.get('window_height', 900)
         self.window_class_name = kwargs.get('window_class_name', '')
+        self.window_title = kwargs.get('window_title', '')
+        self.platform = kwargs.get('platform', 'qq_game_hall')
+        self.resize_window = kwargs.get('resize_window', True)
         self.screenshot_image_logs = kwargs.get('screenshot_image_logs', False)
         self.template_match_image_logs = kwargs.get('template_match_image_logs', False)
         self.animation_image_compare_logs = kwargs.get('animation_image_compare_logs', False)
