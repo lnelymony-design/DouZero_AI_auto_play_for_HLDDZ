@@ -779,17 +779,49 @@ class WorkerThread(QThread):
                 # seat has hard evidence, skipped seats are logically Pass.
                 self_removed = None
                 self_final_out = False
+                self_corrected_after = None
                 if live_hand and confirmed_my_hand and live_hand != confirmed_my_hand:
                     self_removed = hand_difference(confirmed_my_hand, live_hand)
                     if self_removed == "":
                         confirmed_my_hand = live_hand
                         self_removed = None
                     elif self_removed and not is_legal_play(self_removed):
-                        print(
-                            f"手牌差分候选未采信 >>> {display_cards(self_removed)} "
-                            "不是合法牌型，等待下一帧"
+                        # A raised/animated remaining card can disappear from the
+                        # hand OCR for a few frames, turning a legal KK into an
+                        # impossible KK7 delta.  In that case, allow the table
+                        # play to repair the delta only when it is itself legal
+                        # and is a strict multiset subset of the confirmed hand.
+                        visual_candidate = played_values.get("me") or ""
+                        confirmed_counter = Counter(confirmed_my_hand)
+                        visual_counter = Counter(visual_candidate)
+                        visual_is_subset = bool(visual_candidate) and all(
+                            visual_counter[card] <= confirmed_counter[card]
+                            for card in visual_counter
                         )
-                        self_removed = None
+                        if (
+                            visual_is_subset
+                            and is_legal_play(visual_candidate)
+                        ):
+                            corrected_after = remove_chars_from_string(
+                                confirmed_my_hand, visual_candidate
+                            )
+                            if len(corrected_after) < len(confirmed_my_hand):
+                                print(
+                                    f"我的出牌差分纠错 >>> 原差分 "
+                                    f"{display_cards(self_removed)} 非法；"
+                                    f"桌面确认 {display_cards(visual_candidate)}，"
+                                    "采用桌面合法牌型并反算剩余手牌"
+                                )
+                                self_removed = visual_candidate
+                                self_corrected_after = corrected_after
+                            else:
+                                self_removed = None
+                        else:
+                            print(
+                                f"手牌差分候选未采信 >>> {display_cards(self_removed)} "
+                                "不是合法牌型，等待下一帧"
+                            )
+                            self_removed = None
 
                 if (
                     not self_removed
@@ -898,8 +930,15 @@ class WorkerThread(QThread):
                         self.played_card_signal.emit([self.my_position, payload])
                         self.record_hand_inference_action(self.my_position, payload)
                         apply_action_to_douzero(self.my_position, payload)
-                        confirmed_my_hand = "" if self_final_out else live_hand
+                        confirmed_my_hand = (
+                            ""
+                            if self_final_out
+                            else self_corrected_after
+                            if self_corrected_after is not None
+                            else live_hand
+                        )
                         self_removed = None
+                        self_corrected_after = None
                         expected_side = "right"
                         action_committed = True
                         if self_final_out or not confirmed_my_hand:
