@@ -547,16 +547,18 @@ class HandInferenceEngine:
         }
 
     def response_profile(self, action, max_samples=320):
-        """Describe how an enemy can answer a proposed action.
+        """Describe how each opponent and the enemy side can answer an action.
 
-        Returns posterior probabilities for three mutually exclusive outcomes:
+        The top-level probabilities aggregate only true enemies:
+        - landlord: both farmers are enemies;
+        - farmer: only the landlord is an enemy.
+
+        The players field always contains both physical opponents by logical
+        position, including a farmer teammate. This lets the UI explain who can
+        answer without treating a teammate response as enemy risk.
+
+        For every scope, the three outcomes are mutually exclusive:
         ordinary_beat, bomb_only, and unbeatable.
-
-        can_beat is kept for backward compatibility and equals ordinary_beat
-        plus bomb_only. pressure is a display-oriented severity index:
-        ordinary responses count fully, while bomb-only responses count as
-        0.35 because forcing a bomb is materially safer than allowing an
-        ordinary response. Pressure is not a win rate.
         """
         if action in (None, "", "Pass", "pass", "PASS"):
             return None
@@ -584,62 +586,85 @@ class HandInferenceEngine:
             selected = samples
 
         enemies = (
-            [p for p in self.opponents]
+            list(self.opponents)
             if self.my_position == "landlord"
             else ["landlord"]
         )
         rival_env = [RealCard2EnvCard[c] for c in cards]
-
-        ordinary_weight = 0.0
-        bomb_only_weight = 0.0
-        unbeatable_weight = 0.0
-        total_weight = 0.0
         bomb_types = {md.TYPE_4_BOMB, md.TYPE_5_KING_BOMB}
+
+        totals = {
+            player: {
+                "ordinary_weight": 0.0,
+                "bomb_only_weight": 0.0,
+                "unbeatable_weight": 0.0,
+            }
+            for player in self.opponents
+        }
+        aggregate = {
+            "ordinary_weight": 0.0,
+            "bomb_only_weight": 0.0,
+            "unbeatable_weight": 0.0,
+        }
+        total_weight = 0.0
+
+        def response_kind(hand):
+            if hand is None:
+                return "unbeatable"
+            hand_env = [RealCard2EnvCard[c] for c in hand]
+            responses = _candidate_responses(hand_env, rival_env)
+            has_bomb = False
+            for response in responses:
+                response_type = md.get_move_type(response).get("type")
+                if response_type in bomb_types:
+                    has_bomb = True
+                else:
+                    return "ordinary"
+            return "bomb_only" if has_bomb else "unbeatable"
 
         for hands, weight in selected:
             total_weight += weight
-            has_ordinary = False
-            has_bomb = False
+            sample_kinds = {}
 
-            for enemy in enemies:
-                hand = hands.get(enemy)
-                if hand is None:
-                    continue
-                hand_env = [RealCard2EnvCard[c] for c in hand]
-                responses = _candidate_responses(hand_env, rival_env)
-                for response in responses:
-                    response_type = md.get_move_type(response).get("type")
-                    if response_type in bomb_types:
-                        has_bomb = True
-                    else:
-                        has_ordinary = True
-                        break
-                if has_ordinary:
-                    break
+            for player in self.opponents:
+                kind = response_kind(hands.get(player))
+                sample_kinds[player] = kind
+                totals[player][f"{kind}_weight"] += weight
 
-            if has_ordinary:
-                ordinary_weight += weight
-            elif has_bomb:
-                bomb_only_weight += weight
+            enemy_kinds = [
+                sample_kinds[player]
+                for player in enemies
+                if player in sample_kinds
+            ]
+            if "ordinary" in enemy_kinds:
+                aggregate["ordinary_weight"] += weight
+            elif "bomb_only" in enemy_kinds:
+                aggregate["bomb_only_weight"] += weight
             else:
-                unbeatable_weight += weight
+                aggregate["unbeatable_weight"] += weight
 
         if total_weight <= 0:
             return None
 
-        ordinary = ordinary_weight / total_weight
-        bomb_only = bomb_only_weight / total_weight
-        unbeatable = unbeatable_weight / total_weight
-        can_beat_prob = ordinary + bomb_only
-        pressure = ordinary + 0.35 * bomb_only
+        def normalize(bucket):
+            ordinary = bucket["ordinary_weight"] / total_weight
+            bomb_only = bucket["bomb_only_weight"] / total_weight
+            unbeatable = bucket["unbeatable_weight"] / total_weight
+            can_beat_prob = ordinary + bomb_only
+            return {
+                "ordinary_beat": ordinary,
+                "bomb_only": bomb_only,
+                "unbeatable": unbeatable,
+                "can_beat": can_beat_prob,
+                "pressure": ordinary + 0.35 * bomb_only,
+            }
 
-        return {
-            "ordinary_beat": ordinary,
-            "bomb_only": bomb_only,
-            "unbeatable": unbeatable,
-            "can_beat": can_beat_prob,
-            "pressure": pressure,
+        result = normalize(aggregate)
+        result["players"] = {
+            player: normalize(bucket)
+            for player, bucket in totals.items()
         }
+        return result
 
     def response_risk(self, action, max_samples=320):
         profile = self.response_profile(action, max_samples=max_samples)
