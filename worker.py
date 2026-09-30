@@ -325,148 +325,95 @@ class WorkerThread(QThread):
                 )
                 self.action_message = action_message
 
-                # Risk is a tie-breaker among DouZero's credible choices, not
-                # a replacement model.  Restrict adjustment to the raw top 3;
-                # replay calibration showed that allowing ranks 4-6 can promote
-                # a strategically weak action solely because it is hard to beat.
-                candidate_pool = action_list[:3]
-                candidate_triplets = []
-                for action_text, score_text in candidate_pool:
-                    risk = None
-                    if self.hand_inference is not None and action_text != "Pass":
-                        try:
-                            risk = self.hand_inference.response_risk(action_text)
-                        except Exception as risk_exc:
-                            print(f"敌方可压概率计算失败: {risk_exc}")
-                    candidate_triplets.append((action_text, score_text, risk))
-
                 inference_result = self.last_hand_inference_result or {}
                 ess_ratio = inference_result.get("effective_sample_ratio", 0.0)
-                adjustment_enabled = (
-                    bool(self.config.risk_adjustment_enabled)
-                    and self.hand_inference is not None
-                    and ess_ratio >= self.config.risk_adjustment_min_ess_ratio
-                    and not any(count_desync.values())
-                )
-
-                adjusted_candidates = []
-                if adjustment_enabled:
-                    adjusted_candidates = adjust_candidates(
-                        candidate_triplets,
-                        weight=self.config.risk_adjustment_weight,
-                    )
-
-                adjusted_by_model_rank = {
-                    item.model_rank: item for item in adjusted_candidates
-                }
-                adjusted_winner = next(
-                    (
-                        item for item in adjusted_candidates
-                        if item.adjusted_rank == 1
-                    ),
-                    None,
-                )
-
-                display_ranks = [1, 2, 3]
-
+                top_actions = action_list[:3]
                 enriched_actions = []
-                for model_rank in display_ranks:
-                    if model_rank > len(candidate_triplets):
-                        continue
-                    action_text, score_text, risk = candidate_triplets[model_rank - 1]
-                    adjusted = adjusted_by_model_rank.get(model_rank)
-                    risk_text = "-" if risk is None else f"{risk:.0%}"
-                    adjusted_text = (
-                        "-"
-                        if adjusted is None
-                        else f"{adjusted.adjusted_score:.1f}"
+                audit_candidates = []
+
+                for model_rank, (action_text, score_text) in enumerate(
+                    top_actions, start=1
+                ):
+                    profile = None
+                    if self.hand_inference is not None and action_text != "Pass":
+                        try:
+                            profile = self.hand_inference.response_profile(
+                                action_text
+                            )
+                        except Exception as risk_exc:
+                            print(f"敌方响应结构计算失败: {risk_exc}")
+
+                    total_text = (
+                        "-" if profile is None
+                        else f"{profile['can_beat']:.0%}"
                     )
-                    adjusted_rank = (
-                        None if adjusted is None else adjusted.adjusted_rank
+                    ordinary_text = (
+                        "-" if profile is None
+                        else f"{profile['ordinary_beat']:.0%}"
+                    )
+                    bomb_text = (
+                        "-" if profile is None
+                        else f"{profile['bomb_only']:.0%}"
                     )
                     enriched_actions.append(
                         (
                             action_text,
                             score_text,
-                            risk_text,
-                            adjusted_text,
+                            total_text,
+                            ordinary_text,
+                            bomb_text,
                             model_rank,
-                            adjusted_rank,
                         )
                     )
+                    audit_candidates.append({
+                        "action": action_text,
+                        "model_rank": model_rank,
+                        "model_score": float(score_text),
+                        "response_profile": profile,
+                    })
 
                 self.action_list = enriched_actions
                 self.ai_suggestion_signal.emit(self.action_list)
                 douzero_paused_reason = None
 
-                raw_top = candidate_triplets[0] if candidate_triplets else None
-                if raw_top:
-                    raw_action, raw_score, raw_risk = raw_top
-                    raw_risk_text = (
-                        "-" if raw_risk is None else f"{raw_risk:.0%}"
+                if enriched_actions:
+                    action_text, score_text, total_text, ordinary_text, bomb_text, _ = (
+                        enriched_actions[0]
+                    )
+                    shown = (
+                        "不出"
+                        if action_text == "Pass"
+                        else display_cards(action_text)
                     )
                     print(
-                        f"DouZero原建议 >>> "
-                        f"{display_cards(raw_action) if raw_action != 'Pass' else '不出'} "
-                        f"(模型分 {raw_score}，敌方可压 {raw_risk_text})"
+                        f"DouZero建议 >>> {shown} "
+                        f"(模型分 {score_text}，总可压 {total_text}，"
+                        f"普通可压 {ordinary_text}，仅炸可压 {bomb_text})"
                     )
 
-                if adjustment_enabled and adjusted_winner is not None:
-                    changed = adjusted_winner.model_rank != 1
-                    change_text = " [与原建议不同]" if changed else " [与原建议一致]"
-                    print(
-                        f"风险调整建议 >>> "
-                        f"{display_cards(adjusted_winner.action) if adjusted_winner.action != 'Pass' else '不出'} "
-                        f"(原模型第{adjusted_winner.model_rank}，"
-                        f"调分 {adjusted_winner.adjusted_score:.1f}，"
-                        f"λ={self.config.risk_adjustment_weight:.2f})"
-                        f"{change_text}"
+                if top_actions:
+                    raw_action, raw_score = top_actions[0]
+                    raw_profile = (
+                        audit_candidates[0]["response_profile"]
+                        if audit_candidates else None
                     )
-                elif self.config.risk_adjustment_enabled:
-                    print(
-                        f"风险调整暂停 >>> ESS {ess_ratio:.0%} "
-                        f"< 阈值 {self.config.risk_adjustment_min_ess_ratio:.0%}"
-                    )
-
-                if candidate_triplets:
-                    raw_action, raw_score, raw_risk = candidate_triplets[0]
                     suggestion_audit.append({
                         "timestamp": datetime.now().isoformat(timespec="seconds"),
                         "history_length": len(douzero_history),
                         "ess_ratio": ess_ratio,
-                        "risk_adjustment_enabled": adjustment_enabled,
-                        "risk_adjustment_weight": self.config.risk_adjustment_weight,
+                        "risk_adjustment_enabled": False,
                         "raw_top": {
                             "action": raw_action,
                             "model_score": float(raw_score),
-                            "response_risk": raw_risk,
+                            "response_risk": (
+                                None if raw_profile is None
+                                else raw_profile["can_beat"]
+                            ),
+                            "response_profile": raw_profile,
                         },
-                        "adjusted_top": (
-                            None
-                            if adjusted_winner is None
-                            else {
-                                "action": adjusted_winner.action,
-                                "model_rank": adjusted_winner.model_rank,
-                                "model_score": adjusted_winner.model_score,
-                                "response_risk": adjusted_winner.response_risk,
-                                "adjusted_score": adjusted_winner.adjusted_score,
-                            }
-                        ),
-                        "changed_top_action": bool(
-                            adjusted_winner is not None
-                            and adjusted_winner.model_rank != 1
-                        ),
-                        "candidates": [
-                            {
-                                "action": item.action,
-                                "model_rank": item.model_rank,
-                                "model_score": item.model_score,
-                                "response_risk": item.response_risk,
-                                "adjusted_rank": item.adjusted_rank,
-                                "adjusted_score": item.adjusted_score,
-                            }
-                            for item in adjusted_candidates
-                        ],
+                        "adjusted_top": None,
+                        "changed_top_action": False,
+                        "candidates": audit_candidates,
                     })
             except Exception as exc:
                 pause_douzero(f"建议计算失败：{exc}")
