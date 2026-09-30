@@ -175,6 +175,25 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_ai_suggestion_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
 
+        if (
+            isinstance(result, list)
+            and result
+            and isinstance(result[0], (list, tuple))
+            and result[0]
+            and result[0][0] == "__PAUSED__"
+        ):
+            for row in range(1, 4):
+                for col in range(3):
+                    value = "状态暂停" if row == 1 and col == 0 else "-"
+                    item = QtWidgets.QTableWidgetItem(value)
+                    item.setFont(font_content)
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    if row == 1 and col == 0:
+                        item.setForeground(QtGui.QColor("#d00000"))
+                        item.setToolTip("识别历史与DouZero环境暂时无法一致重建；识牌和概率推断仍在继续")
+                    self.suggestionTable.setItem(row, col, item)
+            return
+
         if not result or not isinstance(result, list):
             for row in range(1, 4):
                 for col in range(3):
