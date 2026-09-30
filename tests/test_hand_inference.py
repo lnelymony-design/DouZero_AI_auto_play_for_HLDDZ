@@ -122,6 +122,35 @@ class HandInferenceEngineTests(unittest.TestCase):
         self.assertGreaterEqual(result["effective_sample_ratio"], 0.0)
         self.assertLessEqual(result["effective_sample_ratio"], 1.0)
 
+    def test_adaptive_tempering_respects_ess_floor(self):
+        engine = HandInferenceEngine(
+            my_position="landlord",
+            my_hand_cards="333444555666777888DX",
+            sample_count=320,
+            random_seed=9,
+            min_effective_sample_ratio=0.30,
+        )
+        # A sequence of observed high-card responses creates enough behavior
+        # evidence to exercise the tempering path without changing hard card
+        # constraints.
+        engine.observe("landlord_down", "7")
+        engine.observe("landlord_up", "")
+        engine.observe("landlord", "")
+        engine.observe("landlord_down", "9")
+        engine.observe("landlord_up", "")
+        engine.observe("landlord", "")
+        engine.observe("landlord_down", "J")
+        result = engine.infer()
+
+        self.assertGreaterEqual(
+            result["effective_sample_ratio"],
+            0.30 - 0.01,
+        )
+        self.assertLessEqual(
+            result["behavior_temperature_used"],
+            result["behavior_temperature_configured"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
