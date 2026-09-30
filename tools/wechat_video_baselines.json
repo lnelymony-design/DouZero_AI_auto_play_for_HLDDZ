@@ -1,0 +1,23 @@
+{
+  "腾讯欢乐斗地主 2026-09-30 17-49-40.mp4": {
+    "position": "landlord_down",
+    "initial_hand": "DAAKKKQQJJT544333",
+    "bottom_cards": "A77",
+    "left_initial_count": 20,
+    "right_initial_count": 17
+  },
+  "腾讯欢乐斗地主 2026-09-30 17-51-11.mp4": {
+    "position": "landlord",
+    "initial_hand": "D22AKKQQJT9988777654",
+    "bottom_cards": "DQ7",
+    "left_initial_count": 17,
+    "right_initial_count": 17
+  },
+  "腾讯欢乐斗地主 2026-09-30 17-52-54.mp4": {
+    "position": "landlord_down",
+    "initial_hand": "DAKKKQQT998887543",
+    "bottom_cards": "A53",
+    "left_initial_count": 20,
+    "right_initial_count": 17
+  }
+}
