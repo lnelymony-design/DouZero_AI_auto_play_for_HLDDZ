@@ -38,7 +38,21 @@ jobs:
             --weights 0.42 0.44 0.46 0.48 0.50 0.52 0.54 0.55 \
             --samples 1000 \
             --min-ess 0.40 | tee lambda-eval.txt
+      - name: Validate response risk against settlement truth
+        env:
+          PYTHONPATH: .
+        run: |
+          set -o pipefail
+          python tools/evaluate_replay_truth.py \
+            tools/replay_fixtures/game_01.replay.json \
+            tools/replay_fixtures/game_02.replay.json \
+            tools/replay_fixtures/game_03.replay.json \
+            --weights 0.42 0.46 0.50 0.52 0.54 \
+            --samples 1600 \
+            --max-candidates 3 | tee truth-eval.txt
       - uses: actions/upload-artifact@v4
         with:
           name: lambda-eval
-          path: lambda-eval.txt
+          path: |
+            lambda-eval.txt
+            truth-eval.txt
