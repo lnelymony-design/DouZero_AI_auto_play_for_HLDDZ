@@ -159,6 +159,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.currentMyPosition = None
             self.myPositionLabel.setText('---')
             self._refresh_inference_side_labels()
+            self._refresh_suggestion_side_headers()
             return
 
         self.currentMyPosition = result
@@ -171,6 +172,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.myPositionLabel.setText(posotionTextMap[result])
         self._refresh_inference_side_labels()
+        self._refresh_suggestion_side_headers()
 
     def handle_ai_suggestion_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
