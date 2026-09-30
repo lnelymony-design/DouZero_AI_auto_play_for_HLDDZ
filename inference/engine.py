@@ -11,7 +11,7 @@ import random
 
 from constants import AllEnvCard, EnvCard2RealCard, RealCard2EnvCard
 from douzero.env import move_detector as md
-from .legality import can_beat
+from .legality import can_beat, _candidate_responses
 
 POSITIONS = ("landlord", "landlord_up", "landlord_down")
 INITIAL_HAND_SIZES = {
@@ -546,12 +546,17 @@ class HandInferenceEngine:
             "behavior_model": "heuristic_v2_tempered",
         }
 
-    def response_risk(self, action, max_samples=320):
-        """Estimate whether an enemy *can* legally beat a proposed action.
+    def response_profile(self, action, max_samples=320):
+        """Describe how an enemy can answer a proposed action.
 
-        This is a card-power risk, not a calibrated probability that the enemy
-        will actually choose to respond.  For a farmer, only the landlord is an
-        enemy; for the landlord, both farmers are enemies.
+        Returns posterior probabilities for three mutually exclusive outcomes:
+        ordinary_beat, bomb_only, and unbeatable.
+
+        can_beat is kept for backward compatibility and equals ordinary_beat
+        plus bomb_only. pressure is a display-oriented severity index:
+        ordinary responses count fully, while bomb-only responses count as
+        0.35 because forcing a bomb is materially safer than allowing an
+        ordinary response. Pressure is not a win rate.
         """
         if action in (None, "", "Pass", "pass", "PASS"):
             return None
@@ -571,8 +576,10 @@ class HandInferenceEngine:
         max_samples = max(50, int(max_samples))
         if len(samples) > max_samples:
             step = len(samples) / max_samples
-            selected = [samples[min(len(samples) - 1, int(i * step))]
-                        for i in range(max_samples)]
+            selected = [
+                samples[min(len(samples) - 1, int(i * step))]
+                for i in range(max_samples)
+            ]
         else:
             selected = samples
 
@@ -583,25 +590,60 @@ class HandInferenceEngine:
         )
         rival_env = [RealCard2EnvCard[c] for c in cards]
 
-        risk_weight = 0.0
+        ordinary_weight = 0.0
+        bomb_only_weight = 0.0
+        unbeatable_weight = 0.0
         total_weight = 0.0
+        bomb_types = {md.TYPE_4_BOMB, md.TYPE_5_KING_BOMB}
+
         for hands, weight in selected:
             total_weight += weight
-            can_enemy_beat = False
+            has_ordinary = False
+            has_bomb = False
+
             for enemy in enemies:
                 hand = hands.get(enemy)
                 if hand is None:
                     continue
                 hand_env = [RealCard2EnvCard[c] for c in hand]
-                if can_beat(hand_env, rival_env):
-                    can_enemy_beat = True
+                responses = _candidate_responses(hand_env, rival_env)
+                for response in responses:
+                    response_type = md.get_move_type(response).get("type")
+                    if response_type in bomb_types:
+                        has_bomb = True
+                    else:
+                        has_ordinary = True
+                        break
+                if has_ordinary:
                     break
-            if can_enemy_beat:
-                risk_weight += weight
+
+            if has_ordinary:
+                ordinary_weight += weight
+            elif has_bomb:
+                bomb_only_weight += weight
+            else:
+                unbeatable_weight += weight
 
         if total_weight <= 0:
             return None
-        return risk_weight / total_weight
+
+        ordinary = ordinary_weight / total_weight
+        bomb_only = bomb_only_weight / total_weight
+        unbeatable = unbeatable_weight / total_weight
+        can_beat_prob = ordinary + bomb_only
+        pressure = ordinary + 0.35 * bomb_only
+
+        return {
+            "ordinary_beat": ordinary,
+            "bomb_only": bomb_only,
+            "unbeatable": unbeatable,
+            "can_beat": can_beat_prob,
+            "pressure": pressure,
+        }
+
+    def response_risk(self, action, max_samples=320):
+        profile = self.response_profile(action, max_samples=max_samples)
+        return None if profile is None else profile["can_beat"]
 
     def response_risks(self, actions, max_samples=320):
         return {
