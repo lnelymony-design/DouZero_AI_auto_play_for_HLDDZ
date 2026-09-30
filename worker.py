@@ -277,8 +277,65 @@ class WorkerThread(QThread):
             print(f"微信牌局 >>> {label}：不出{suffix}")
             self.played_card_signal.emit([player, "Pass"])
             self.record_hand_inference_action(player, "")
+            apply_action_to_douzero(player, "")
             expected_side = side_cycle[side]
             return True
+
+        def emit_douzero_suggestion_if_my_turn():
+            if self.env is None or self.env.game_over:
+                self.ai_suggestion_signal.emit([])
+                return
+            if self.env.acting_player_position != self.my_position:
+                self.ai_suggestion_signal.emit([])
+                return
+
+            try:
+                action_message, action_list = self.env.step(
+                    self.my_position, action=None, update=False
+                )
+                self.action_message = action_message
+                self.action_list = action_list[:3]
+                self.ai_suggestion_signal.emit(self.action_list)
+
+                action_text = action_message.get("action", "")
+                if action_text:
+                    print(
+                        f"DouZero建议 >>> {display_cards(action_text)} "
+                        f"(评分 {action_message.get('win_rate', 0):.3f})"
+                    )
+                else:
+                    print("DouZero建议 >>> 不出")
+            except Exception as exc:
+                self.ai_suggestion_signal.emit([])
+                print(f"DouZero建议计算失败（不影响识牌/推牌）: {exc}")
+
+        def apply_action_to_douzero(player, cards):
+            if self.env is None:
+                return False
+            if self.env.game_over:
+                self.ai_suggestion_signal.emit([])
+                return False
+
+            if self.env.acting_player_position != player:
+                print(
+                    "DouZero状态不同步 >>> "
+                    f"环境等待 {self.env.acting_player_position}，"
+                    f"识别到 {player}；本次不写入AI环境"
+                )
+                self.ai_suggestion_signal.emit([])
+                return False
+
+            try:
+                action_env = sorted(
+                    [RealCard2EnvCard[card] for card in cards]
+                )
+                self.env.step(player, action=action_env, update=True)
+                emit_douzero_suggestion_if_my_turn()
+                return True
+            except Exception as exc:
+                self.ai_suggestion_signal.emit([])
+                print(f"DouZero状态更新失败（不影响识牌/推牌）: {exc}")
+                return False
 
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
@@ -296,6 +353,30 @@ class WorkerThread(QThread):
                 three_landlord_cards=three_cards,
             )
 
+            # Build the original DouZero environment from the same confirmed
+            # WeChat state. Opponent card identities are intentionally unknown;
+            # game_new.py tracks their counts while the user's infoset uses the
+            # complete unseen-card pool, matching the original project design.
+            self.my_hand_cards_env = sorted(
+                [RealCard2EnvCard[card] for card in my_hand]
+            )
+            self.three_cards_env = sorted(
+                [RealCard2EnvCard[card] for card in three_cards]
+            )
+            self.other_hands_cards = []
+            self.all_player_card_data = {}
+            self.env = None
+            try:
+                self.initOtherPlayerHandCards()
+                self.initAllPlayerCardData()
+                self.create_ai_representer()
+                self.env.card_play_init(self.all_player_card_data)
+                print("DouZero只读建议环境已初始化")
+            except Exception as exc:
+                self.env = None
+                self.ai_suggestion_signal.emit([])
+                print(f"DouZero初始化失败（识牌/推牌继续运行）: {exc}")
+
             landlord_side = landlord_start_side[position_code]
             for side in ("left", "right"):
                 tracked_remaining[side] = 20 if side == landlord_side else 17
@@ -306,14 +387,17 @@ class WorkerThread(QThread):
                 )
                 count_desync[side] = False
 
-            remaining = list(AllEnvCard)
-            for card in [RealCard2EnvCard[ch] for ch in my_hand]:
-                if card in remaining:
-                    remaining.remove(card)
-            wechat_other_hands_cards_str = ''.join(
-                [EnvCard2RealCard[x] for x in remaining]
-            )[::-1]
-            self.other_hands_cards_str = wechat_other_hands_cards_str
+            if self.other_hands_cards_str:
+                wechat_other_hands_cards_str = self.other_hands_cards_str
+            else:
+                remaining = list(AllEnvCard)
+                for card in [RealCard2EnvCard[ch] for ch in my_hand]:
+                    if card in remaining:
+                        remaining.remove(card)
+                wechat_other_hands_cards_str = ''.join(
+                    [EnvCard2RealCard[x] for x in remaining]
+                )[::-1]
+                self.other_hands_cards_str = wechat_other_hands_cards_str
 
             self.card_recorder_signal.emit(wechat_other_hands_cards_str)
             self.three_cards_signal.emit(three_cards)
@@ -337,6 +421,7 @@ class WorkerThread(QThread):
             print("==============================")
             print()
             self.refresh_hand_inference()
+            emit_douzero_suggestion_if_my_turn()
 
         def pending_self_change(raw_hand):
             if not round_initialized or not confirmed_my_hand or not raw_hand:
@@ -625,12 +710,14 @@ class WorkerThread(QThread):
                         print(f"微信牌局 >>> 我的出牌: {display_cards(payload)}")
                         self.played_card_signal.emit([self.my_position, payload])
                         self.record_hand_inference_action(self.my_position, payload)
+                        apply_action_to_douzero(self.my_position, payload)
                         confirmed_my_hand = "" if self_final_out else live_hand
                         self_removed = None
                         expected_side = "right"
                         action_committed = True
                         if self_final_out or not confirmed_my_hand:
                             print("微信牌局 >>> 我的手牌归零，本局结束")
+                            self.ai_suggestion_signal.emit([])
                             round_initialized = False
                             expected_side = None
                             break
@@ -656,10 +743,12 @@ class WorkerThread(QThread):
                         recent_play[actor] = {"cards": "", "time": 0.0}
                         emit_remaining_counts()
                         self.record_hand_inference_action(player, cards)
+                        apply_action_to_douzero(player, cards)
                         expected_side = side_cycle[actor]
                         action_committed = True
                         if new_count == 0:
                             print(f"微信牌局 >>> {label}剩余 0 张，本局结束")
+                            self.ai_suggestion_signal.emit([])
                             round_initialized = False
                             expected_side = None
                             break
