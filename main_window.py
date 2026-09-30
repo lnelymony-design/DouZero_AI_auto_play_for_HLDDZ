@@ -117,6 +117,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stop_worker_thread()
         event.accept()
 
+    @staticmethod
+    def display_cards(cards):
+        if not cards:
+            return cards
+        display_map = {"D": "大王", "X": "小王", "T": "10"}
+        return " ".join(display_map.get(card, card) for card in cards)
+
     def handle_card_recorder_update(self, result):
         font = QtGui.QFont("微软雅黑", 10, QtGui.QFont.Bold)
 
@@ -142,7 +149,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.threeCardsLabel.setText('---')
             return
         
-        self.threeCardsLabel.setText(result)
+        self.threeCardsLabel.setText(self.display_cards(result))
 
     def handle_my_position_update(self, result):
         if len(result) == 0:
@@ -175,7 +182,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
         for i in range(3):
             data = result[i] if len(result) > i else ('-', '-')
-            left_item = QtWidgets.QTableWidgetItem(data[0])
+            action_text = data[0]
+            if isinstance(action_text, str) and action_text not in ("-", "Pass"):
+                action_text = self.display_cards(action_text)
+            left_item = QtWidgets.QTableWidgetItem(action_text)
             left_item.setFont(font_content)
             left_item.setTextAlignment(QtCore.Qt.AlignCenter)
             left_item.setForeground(QtGui.QColor("#0000FF"))
@@ -273,7 +283,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.playedCardsTable.setItem(3, 1, emptyItem3)
             return
 
-        playedCardRightItem = QtWidgets.QTableWidgetItem(result[1])
+        played_text = result[1] if result[1] == "Pass" else self.display_cards(result[1])
+        playedCardRightItem = QtWidgets.QTableWidgetItem(played_text)
         playedCardRightItem.setFont(font_content)
         playedCardRightItem.setTextAlignment(QtCore.Qt.AlignCenter)
         playedCardRightItem.setForeground(QtGui.QColor("#0000FF"))
