@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+from collections import Counter
 
 from PyQt5.QtCore import pyqtSignal, QThread
 
@@ -196,12 +197,29 @@ class WorkerThread(QThread):
         tracked_remaining = {"left": None, "right": None}
         observed_remaining = {"left": None, "right": None}
         count_desync = {"left": False, "right": False}
+        rejected_count_candidate = {"left": None, "right": None}
+        confirmed_my_hand = None
 
         def display_cards(cards):
             if not cards:
                 return "-"
             display_map = {"D": "大王", "X": "小王", "T": "10"}
             return " ".join(display_map.get(card, card) for card in cards)
+
+        def hand_difference(before, after):
+            """Return cards removed from a hand, or None if 'after' is not a subset."""
+            before_counter = Counter(before)
+            after_counter = Counter(after)
+            if any(after_counter[card] > before_counter[card] for card in after_counter):
+                return None
+
+            missing = before_counter - after_counter
+            result = []
+            for card in before:
+                if missing[card] > 0:
+                    result.append(card)
+                    missing[card] -= 1
+            return "".join(result)
 
         def stable_value(key, value, frames=2):
             previous, count = pending.get(key, (None, 0))
@@ -241,12 +259,13 @@ class WorkerThread(QThread):
 
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
-            nonlocal wechat_other_hands_cards_str
+            nonlocal wechat_other_hands_cards_str, confirmed_my_hand
 
             self.my_hand_cards = my_hand
             self.three_cards = three_cards
             self.my_position_code = position_code
             self.my_position = PlayerPosition[position_code]
+            confirmed_my_hand = my_hand
 
             self.hand_inference = HandInferenceEngine(
                 my_position=self.my_position,
@@ -318,7 +337,8 @@ class WorkerThread(QThread):
 
             try:
                 my_hand_raw = recognizer.recognize_my_hand(screenshot)
-                my_hand = stable_value("my_hand", my_hand_raw, frames=3)
+                my_hand = stable_value("my_hand", my_hand_raw, frames=5)
+                pending_my_action = None
                 if my_hand is not None and my_hand:
                     if my_hand != last_state["my_hand"]:
                         print(
@@ -326,6 +346,20 @@ class WorkerThread(QThread):
                             f"{display_cards(my_hand)}"
                         )
                         last_state["my_hand"] = my_hand
+
+                    if round_initialized and confirmed_my_hand and my_hand != confirmed_my_hand:
+                        removed = hand_difference(confirmed_my_hand, my_hand)
+                        if removed is not None and len(removed) > 0:
+                            if expected_side == "me":
+                                pending_my_action = removed
+                                confirmed_my_hand = my_hand
+                            elif len(my_hand) < len(confirmed_my_hand):
+                                print(
+                                    "手牌差分校验 >>> 检测到我的手牌减少，但当前行动方不是我；"
+                                    "暂不写入动作历史，等待状态重同步"
+                                )
+                        elif removed == "":
+                            confirmed_my_hand = my_hand
 
                 three_raw = recognizer.recognize_bottom_cards(screenshot)
                 three_cards = stable_value("three_cards", three_raw)
@@ -387,21 +421,39 @@ class WorkerThread(QThread):
                 }
 
                 action_accepted = False
-                if round_initialized and expected_side is not None:
+
+                if round_initialized and pending_my_action:
+                    visual_my_play = played_values.get("me") or ""
+                    if visual_my_play and visual_my_play != pending_my_action:
+                        print(
+                            f"我的出牌校正 >>> 桌面识别 {display_cards(visual_my_play)}；"
+                            f"手牌差分 {display_cards(pending_my_action)}，采用手牌差分"
+                        )
+                    print(
+                        f"微信牌局 >>> 我的出牌: {display_cards(pending_my_action)}"
+                    )
+                    self.played_card_signal.emit([self.my_position, pending_my_action])
+                    self.record_hand_inference_action(self.my_position, pending_my_action)
+                    expected_side = "right"
+                    action_accepted = True
+                if round_initialized and expected_side is not None and not action_accepted:
                     key_map = {
                         "left": "left_played",
                         "right": "right_played",
-                        "me": "my_played",
                     }
                     label_map = {
                         "left": "左侧出牌",
                         "right": "右侧出牌",
-                        "me": "我的出牌",
                     }
-                    current_key = key_map[expected_side]
-                    stable_play = stable_value(
-                        current_key, played_values[expected_side], frames=2
-                    )
+                    if expected_side == "me":
+                        current_key = None
+                    else:
+                        current_key = key_map[expected_side]
+                    stable_play = None
+                    if current_key is not None:
+                        stable_play = stable_value(
+                            current_key, played_values[expected_side], frames=2
+                        )
 
                     if stable_play == "":
                         played_latched[current_key] = False
@@ -479,7 +531,7 @@ class WorkerThread(QThread):
                             expected=tracked_remaining[side],
                         )
                         stable_count = stable_value(
-                            f"{side}_remaining_count", raw_count, frames=2
+                            f"{side}_remaining_count", raw_count, frames=4
                         )
                         if stable_count is None:
                             continue
@@ -488,29 +540,23 @@ class WorkerThread(QThread):
                         if previous_observed == stable_count:
                             continue
 
-                        observed_remaining[side] = stable_count
                         state_count = tracked_remaining[side]
-                        count_desync[side] = (
-                            state_count is not None and state_count != stable_count
-                        )
-
-                        if count_desync[side]:
-                            print(
-                                f"剩余张数校验 >>> {label}实测 {stable_count} 张，"
-                                f"动作历史推算 {state_count} 张 [状态不同步]"
-                            )
-                            # Use the visual count for turn/end tracking, but do not
-                            # invent missing card identities for the probability model.
-                            tracked_remaining[side] = stable_count
+                        if state_count is not None and stable_count == state_count:
+                            observed_remaining[side] = stable_count
+                            count_desync[side] = False
+                            rejected_count_candidate[side] = None
+                            print(f"剩余张数 >>> {label}: {stable_count} [画面确认]")
+                            emit_remaining_counts()
                         else:
-                            print(f"剩余张数 >>> {label}: {stable_count}")
-
-                        emit_remaining_counts()
-
-                        if stable_count == 0:
-                            print(f"微信牌局 >>> {label}剩余 0 张，本局结束")
-                            round_initialized = False
-                            expected_side = None
+                            # OCR is only a validator.  A mismatching visual candidate
+                            # must never overwrite the action-derived state, otherwise a
+                            # single bad read can create a false game-over.
+                            if rejected_count_candidate[side] != stable_count:
+                                rejected_count_candidate[side] = stable_count
+                                print(
+                                    f"剩余张数候选未采信 >>> {label}识别 {stable_count} 张，"
+                                    f"动作历史 {state_count} 张"
+                                )
 
             except Exception as exc:
                 print(f"微信牌局接入异常（不会退出线程）: {exc}")
