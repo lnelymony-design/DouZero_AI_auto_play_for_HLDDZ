@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import time
 from collections import Counter
+from datetime import datetime
 
 from PyQt5.QtCore import pyqtSignal, QThread
 
@@ -106,6 +108,7 @@ class WorkerThread(QThread):
 
         # 概率推牌器：利用已知手牌、底牌、出牌和 Pass 动作推测两家剩余手牌。
         self.hand_inference = None
+        self.last_hand_inference_result = None
 
         self.try_num = 3
         self.round_count = 0
@@ -210,6 +213,7 @@ class WorkerThread(QThread):
         douzero_players = None
         douzero_history = []
         douzero_paused_reason = None
+        pending_round_audit = None
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -404,6 +408,75 @@ class WorkerThread(QThread):
             emit_douzero_suggestion_if_my_turn()
             return True
 
+        def queue_round_audit(reason):
+            nonlocal pending_round_audit
+            if self.hand_inference is None:
+                return
+
+            history = [
+                {
+                    "player": player,
+                    "action": cards if cards else "Pass",
+                }
+                for player, cards in self.hand_inference.history
+            ]
+            pending_round_audit = {
+                "due_time": time.monotonic() + 1.2,
+                "reason": reason,
+                "ended_at": datetime.now().isoformat(timespec="seconds"),
+                "my_position": self.my_position,
+                "initial_my_hand": "".join(self.hand_inference.initial_my_hand),
+                "three_landlord_cards": "".join(
+                    self.hand_inference.three_landlord_cards
+                ),
+                "public_history": history,
+                "tracked_remaining": dict(tracked_remaining),
+                "observed_remaining": dict(observed_remaining),
+                "count_desync": dict(count_desync),
+                "inference": self.last_hand_inference_result,
+                "douzero_history": [
+                    {
+                        "player": player,
+                        "action": cards if cards else "Pass",
+                    }
+                    for player, cards in douzero_history
+                ],
+            }
+
+        def flush_round_audit_if_due(screenshot):
+            nonlocal pending_round_audit
+            if pending_round_audit is None:
+                return
+            if time.monotonic() < pending_round_audit["due_time"]:
+                return
+
+            try:
+                root = os.path.join("screenshots", "inference_audits")
+                os.makedirs(root, exist_ok=True)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                image_name = f"{stamp}.png"
+                json_name = f"{stamp}.json"
+                image_path = os.path.join(root, image_name)
+                json_path = os.path.join(root, json_name)
+
+                screenshot.save(image_path)
+                payload = dict(pending_round_audit)
+                payload.pop("due_time", None)
+                payload["screenshot"] = image_name
+                payload["format"] = "wechat_inference_audit_v1"
+
+                with open(json_path, "w", encoding="utf-8") as fp:
+                    json.dump(payload, fp, ensure_ascii=False, indent=2)
+
+                print(
+                    f"推牌审计已保存 >>> {json_path} "
+                    f"(结算截图 {image_name})"
+                )
+            except Exception as exc:
+                print(f"推牌审计保存失败: {exc}")
+            finally:
+                pending_round_audit = None
+
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
@@ -535,6 +608,7 @@ class WorkerThread(QThread):
                 continue
 
             missing_reported = False
+            flush_round_audit_if_due(screenshot)
             if not screenshot_saved:
                 os.makedirs('screenshots', exist_ok=True)
                 calibration_path = os.path.join('screenshots', 'wechat_calibration.png')
@@ -809,6 +883,7 @@ class WorkerThread(QThread):
                         action_committed = True
                         if self_final_out or not confirmed_my_hand:
                             print("微信牌局 >>> 我的手牌归零，本局结束")
+                            queue_round_audit("my_hand_zero")
                             self.ai_suggestion_signal.emit([])
                             round_initialized = False
                             expected_side = None
@@ -840,6 +915,7 @@ class WorkerThread(QThread):
                         action_committed = True
                         if new_count == 0:
                             print(f"微信牌局 >>> {label}剩余 0 张，本局结束")
+                            queue_round_audit(f"{actor}_remaining_zero")
                             self.ai_suggestion_signal.emit([])
                             round_initialized = False
                             expected_side = None
@@ -1393,6 +1469,7 @@ class WorkerThread(QThread):
 
         try:
             result = self.hand_inference.infer()
+            self.last_hand_inference_result = result
             self.hand_inference_signal.emit(result)
 
             summary = HandInferenceEngine.compact_summary(result)
