@@ -475,10 +475,12 @@ class WechatCardRecognizer:
             return None
 
         height, width = bgr.shape[:2]
+        # Read only the inner digit strip.  The previous wider crop included
+        # the bright blue badge border and caused false values such as 14 -> 5.
         if side == "left":
-            region = (0.090, 0.145, 0.420, 0.525)
+            region = (0.107, 0.130, 0.452, 0.500)
         else:
-            region = (0.855, 0.920, 0.420, 0.525)
+            region = (0.871, 0.897, 0.452, 0.500)
 
         x0 = int(region[0] * width)
         x1 = int(region[1] * width)
