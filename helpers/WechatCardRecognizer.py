@@ -384,17 +384,13 @@ class WechatCardRecognizer:
         if bgr is None:
             return ""
 
-        # In the WeChat miniapp a 17-card farmer hand is centered, while the
-        # landlord's 20-card hand expands almost edge-to-edge.  The three
-        # supplied full-game recordings include both layouts; using the farmer
-        # crop for a landlord hand cuts off the first/last cards and explains
-        # the earlier 18/16/7-card false reads.
-        if is_landlord:
-            rank_region = (0.005, 0.995, 0.655, 0.745)
-            joker_region = (0.005, 0.995, 0.655, 0.86)
-        else:
-            rank_region = (0.08, 0.93, 0.655, 0.745)
-            joker_region = (0.08, 0.93, 0.655, 0.86)
+        # Video calibration: both 17-card and 20-card layouts are safe to scan
+        # almost edge-to-edge.  Selected cards rise by roughly 20-30 px, so the
+        # rank band must start higher than the old 0.655 crop.  This wider band
+        # recovered every card in the recorded 20-card landlord hand, including
+        # a raised 7 that the old crop dropped.
+        rank_region = (0.005, 0.995, 0.60, 0.755)
+        joker_region = (0.005, 0.995, 0.60, 0.87)
 
         normal = self._recognize_rank_band(
             bgr,
