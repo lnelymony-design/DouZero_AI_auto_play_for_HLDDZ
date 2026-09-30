@@ -9,7 +9,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.screenHelper = ScreenHelper()
-        self.max_width = 880
+        self.max_width = 960
         self.max_height = 650
 
         if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
@@ -177,13 +177,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         def clear_rows(paused=False):
             for row in range(1, 4):
-                for col in range(5):
-                    value = "状态暂停" if paused and row == 1 and col == 0 else "-"
+                for col in range(7):
+                    value = (
+                        "状态暂停"
+                        if paused and row == 1 and col == 0
+                        else "-"
+                    )
                     item = QtWidgets.QTableWidgetItem(value)
                     item.setFont(font_content)
                     item.setTextAlignment(QtCore.Qt.AlignCenter)
                     if paused and row == 1 and col == 0:
                         item.setForeground(QtGui.QColor("#d00000"))
+                        item.setToolTip(
+                            "识别历史与DouZero环境暂时无法一致重建；"
+                            "识牌和概率推断仍在继续"
+                        )
                     self.suggestionTable.setItem(row, col, item)
 
         if (
@@ -201,21 +209,39 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         for i in range(3):
-            data = result[i] if len(result) > i else ("-", "-", "-", "-", "-", None)
+            data = (
+                result[i]
+                if len(result) > i
+                else ("-", "-", "-", "-", "-", "-", "-", None)
+            )
             action_raw = data[0] if len(data) > 0 else "-"
             score_text = data[1] if len(data) > 1 else "-"
             total_text = data[2] if len(data) > 2 else "-"
-            ordinary_text = data[3] if len(data) > 3 else "-"
-            bomb_text = data[4] if len(data) > 4 else "-"
-            model_rank = data[5] if len(data) > 5 else None
+            left_ordinary = data[3] if len(data) > 3 else "-"
+            left_bomb = data[4] if len(data) > 4 else "-"
+            right_ordinary = data[5] if len(data) > 5 else "-"
+            right_bomb = data[6] if len(data) > 6 else "-"
+            model_rank = data[7] if len(data) > 7 else None
 
             action_text = action_raw
-            if isinstance(action_raw, str) and action_raw not in ("-", "Pass"):
+            if (
+                isinstance(action_raw, str)
+                and action_raw not in ("-", "Pass")
+            ):
                 action_text = self.display_cards(action_raw)
             elif action_raw == "Pass":
                 action_text = "不出"
 
-            values = [action_text, score_text, total_text, ordinary_text, bomb_text]
+            values = [
+                action_text,
+                score_text,
+                total_text,
+                left_ordinary,
+                left_bomb,
+                right_ordinary,
+                right_bomb,
+            ]
+
             for col, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(str(value))
                 item.setFont(font_content)
@@ -224,30 +250,45 @@ class MainWindow(QtWidgets.QMainWindow):
                 if col == 0:
                     item.setForeground(QtGui.QColor("#0066cc"))
                     if model_rank is not None:
-                        item.setToolTip(f"DouZero原模型第 {model_rank} 候选")
+                        item.setToolTip(
+                            f"DouZero原模型第 {model_rank} 候选"
+                        )
                 elif col == 1:
-                    item.setToolTip("DouZero原始候选模型分；不是校准后的胜率")
+                    item.setToolTip(
+                        "DouZero原始候选模型分；不是校准后的胜率"
+                    )
                     if model_rank == 1:
                         item.setForeground(QtGui.QColor("#0066cc"))
-                elif col in (2, 3, 4):
-                    tips = {
-                        2: "敌方存在任意合法压制手段的后验概率",
-                        3: "敌方无需炸弹/王炸即可压住的后验概率",
-                        4: "敌方只有动用炸弹或王炸才能压住的后验概率",
+                else:
+                    tooltips = {
+                        2: "真正敌方至少一人存在合法压制手段的后验概率；不是胜率",
+                        3: "左侧玩家无需炸弹即可压住的后验概率",
+                        4: "左侧玩家只有动用炸弹或王炸才能压住的后验概率",
+                        5: "右侧玩家无需炸弹即可压住的后验概率",
+                        6: "右侧玩家只有动用炸弹或王炸才能压住的后验概率",
                     }
-                    item.setToolTip(tips[col] + "；均不是胜率")
+                    item.setToolTip(tooltips[col])
+
                     if isinstance(value, str) and value.endswith("%"):
                         try:
                             p = float(value[:-1]) / 100.0
-                            if col in (2, 3):
+                            if col in (2, 3, 5):
                                 if p >= 0.75:
-                                    item.setForeground(QtGui.QColor("#d00000"))
+                                    item.setForeground(
+                                        QtGui.QColor("#d00000")
+                                    )
                                 elif p >= 0.50:
-                                    item.setForeground(QtGui.QColor("#c26b00"))
+                                    item.setForeground(
+                                        QtGui.QColor("#c26b00")
+                                    )
                                 elif p <= 0.20:
-                                    item.setForeground(QtGui.QColor("#008000"))
-                            elif col == 4 and p >= 0.10:
-                                item.setForeground(QtGui.QColor("#7a3db8"))
+                                    item.setForeground(
+                                        QtGui.QColor("#008000")
+                                    )
+                            elif col in (4, 6) and p >= 0.10:
+                                item.setForeground(
+                                    QtGui.QColor("#7a3db8")
+                                )
                         except ValueError:
                             pass
 
@@ -859,10 +900,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def create_suggestion_table(self):
         self.suggestionTable = QtWidgets.QTableWidget(self)
-        self.suggestionTable.setGeometry(0, 209, 360, 150)
-        self.suggestionTable.setFixedSize(360, 150)
+        self.suggestionTable.setGeometry(0, 209, 430, 150)
+        self.suggestionTable.setFixedSize(430, 150)
         self.suggestionTable.setRowCount(4)
-        self.suggestionTable.setColumnCount(5)
+        self.suggestionTable.setColumnCount(7)
 
         self.suggestionTable.verticalHeader().setVisible(False)
         self.suggestionTable.horizontalHeader().setVisible(False)
@@ -871,17 +912,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(4):
             self.suggestionTable.setRowHeight(row, 33)
 
-        self.suggestionTable.setColumnWidth(0, 120)
-        self.suggestionTable.setColumnWidth(1, 56)
-        self.suggestionTable.setColumnWidth(2, 60)
-        self.suggestionTable.setColumnWidth(3, 64)
-        self.suggestionTable.setColumnWidth(4, 60)
+        widths = [104, 52, 56, 54, 54, 54, 54]
+        for col, width in enumerate(widths):
+            self.suggestionTable.setColumnWidth(col, width)
 
-        headers = ['候选', '模型分', '总可压', '普通压', '仅炸压']
+        headers = ['候选', '模型分', '敌总压', '左普', '左炸', '右普', '右炸']
         contents = [
-            ('-', '-', '-', '-', '-'),
-            ('-', '-', '-', '-', '-'),
-            ('-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-', '-', '-'),
         ]
 
         font_header = QtGui.QFont("微软雅黑", 8)
@@ -900,15 +939,73 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setTextAlignment(QtCore.Qt.AlignCenter)
                 self.suggestionTable.setItem(row, col, item)
 
-        self.suggestionTable.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.suggestionTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.suggestionTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.suggestionTable.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.suggestionTable.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOff
+        )
+        self.suggestionTable.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOff
+        )
+        self.suggestionTable.setEditTriggers(
+            QtWidgets.QAbstractItemView.NoEditTriggers
+        )
+        self.suggestionTable.setSelectionMode(
+            QtWidgets.QAbstractItemView.NoSelection
+        )
         self.suggestionTable.setStyleSheet("""
             QTableWidget::item { background-color: #F3F3F3; }
             QTableWidget::item:alternate { background-color: #E3E3E3; }
         """)
         self.suggestionTable.setAlternatingRowColors(True)
+        self._refresh_suggestion_side_headers()
+
+    def _refresh_suggestion_side_headers(self):
+        if not hasattr(self, "suggestionTable"):
+            return
+
+        positions = ['landlord_up', 'landlord', 'landlord_down']
+        mine = getattr(self, "currentMyPosition", None)
+
+        left_relation = ""
+        right_relation = ""
+        if mine in positions:
+            code = positions.index(mine)
+            right = positions[(code + 1) % 3]
+            left = positions[(code + 2) % 3]
+
+            def relation(other):
+                if mine == 'landlord':
+                    return '敌'
+                return '敌' if other == 'landlord' else '友'
+
+            left_relation = relation(left)
+            right_relation = relation(right)
+
+        labels = [
+            '候选',
+            '模型分',
+            '敌总压',
+            f'左{left_relation}普' if left_relation else '左普',
+            f'左{left_relation}炸' if left_relation else '左炸',
+            f'右{right_relation}普' if right_relation else '右普',
+            f'右{right_relation}炸' if right_relation else '右炸',
+        ]
+        tips = [
+            'DouZero候选动作',
+            'DouZero原始模型分；不是胜率',
+            '真正敌方至少一人能压住的后验概率',
+            '左侧玩家无需炸弹即可压住的概率',
+            '左侧玩家只有使用炸弹/王炸才能压住的概率',
+            '右侧玩家无需炸弹即可压住的概率',
+            '右侧玩家只有使用炸弹/王炸才能压住的概率',
+        ]
+        for col, label in enumerate(labels):
+            item = self.suggestionTable.item(0, col)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                self.suggestionTable.setItem(0, col, item)
+            item.setText(label)
+            item.setToolTip(tips[col])
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
 
     def create_played_card_table(self):
         self.playedCardsTable = QtWidgets.QTableWidget(self)
