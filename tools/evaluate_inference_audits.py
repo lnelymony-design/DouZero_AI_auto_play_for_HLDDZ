@@ -25,8 +25,11 @@ from itertools import product
 import cv2
 
 from config import Config
+from constants import RealCard2EnvCard
+from douzero.env import move_detector as md
 from helpers.WechatCardRecognizer import WechatCardRecognizer
 from inference.engine import CARD_ORDER, HandInferenceEngine
+from inference.legality import _candidate_responses
 
 
 SIDE_POSITION_MAP = {
@@ -197,6 +200,212 @@ def aggregate(scores):
     }
 
 
+def _hand_at_snapshot(audit, position, history_length):
+    final_hand = audit.get("_actual_hands", {}).get(position)
+    if final_hand is None:
+        return None
+
+    cards = list(final_hand)
+    history = audit.get("public_history", [])
+    for item in history[history_length:]:
+        if item.get("player") != position:
+            continue
+        action = item.get("action", "")
+        if not action or action == "Pass":
+            continue
+        cards.extend(action)
+    return cards
+
+
+def _response_kind(hand_cards, action):
+    if hand_cards is None or not action or action == "Pass":
+        return None
+    rival = [RealCard2EnvCard[c] for c in action]
+    hand = [RealCard2EnvCard[c] for c in hand_cards]
+    responses = _candidate_responses(hand, rival)
+    bomb_types = {md.TYPE_4_BOMB, md.TYPE_5_KING_BOMB}
+    has_bomb = False
+    for response in responses:
+        response_type = md.get_move_type(response).get("type")
+        if response_type in bomb_types:
+            has_bomb = True
+        else:
+            return "ordinary"
+    return "bomb_only" if has_bomb else "unbeatable"
+
+
+def _enemy_positions(my_position):
+    if my_position == "landlord":
+        return ["landlord_up", "landlord_down"]
+    return ["landlord"]
+
+
+def _same_team(a, b):
+    if a == "landlord" or b == "landlord":
+        return a == b
+    return True
+
+
+def response_rows(audits):
+    rows = []
+
+    for audit in audits:
+        my_position = audit.get("my_position")
+        if my_position not in SIDE_POSITION_MAP:
+            continue
+
+        for snapshot in audit.get("suggestion_audit", []):
+            history_length = snapshot.get("history_length")
+            if not isinstance(history_length, int) or history_length < 0:
+                continue
+
+            for candidate in snapshot.get("candidates", []):
+                action = candidate.get("action")
+                profile = candidate.get("response_profile")
+                if not action or action == "Pass" or not profile:
+                    continue
+
+                # Score each logical opponent independently.
+                player_profiles = profile.get("players", {})
+                for position, player_profile in player_profiles.items():
+                    hand = _hand_at_snapshot(
+                        audit, position, history_length
+                    )
+                    kind = _response_kind(hand, action)
+                    if kind is None:
+                        continue
+                    rows.append({
+                        "scope": "player",
+                        "position": position,
+                        "relation": (
+                            "teammate"
+                            if _same_team(my_position, position)
+                            else "enemy"
+                        ),
+                        "pred": player_profile,
+                        "truth": kind,
+                    })
+
+                # Score the top-level profile only when every true enemy hand
+                # needed for the aggregate is available.
+                enemies = _enemy_positions(my_position)
+                enemy_kinds = []
+                complete = True
+                for position in enemies:
+                    hand = _hand_at_snapshot(
+                        audit, position, history_length
+                    )
+                    if hand is None:
+                        complete = False
+                        break
+                    kind = _response_kind(hand, action)
+                    if kind is None:
+                        complete = False
+                        break
+                    enemy_kinds.append(kind)
+
+                if complete:
+                    if "ordinary" in enemy_kinds:
+                        aggregate_kind = "ordinary"
+                    elif "bomb_only" in enemy_kinds:
+                        aggregate_kind = "bomb_only"
+                    else:
+                        aggregate_kind = "unbeatable"
+                    rows.append({
+                        "scope": "enemy_aggregate",
+                        "position": "enemy_aggregate",
+                        "relation": "enemy",
+                        "pred": profile,
+                        "truth": aggregate_kind,
+                    })
+
+    return rows
+
+
+def aggregate_response(rows):
+    if not rows:
+        return None
+
+    binary_terms = []
+    multiclass_terms = []
+    pred_can = []
+    actual_can = []
+    pred_ordinary = []
+    pred_bomb = []
+    pred_unbeatable = []
+    actual_ordinary = []
+    actual_bomb = []
+    actual_unbeatable = []
+
+    for row in rows:
+        pred = row["pred"]
+        truth = row["truth"]
+        p_ordinary = float(pred.get("ordinary_beat", 0.0))
+        p_bomb = float(pred.get("bomb_only", 0.0))
+        p_unbeatable = float(pred.get("unbeatable", 0.0))
+        p_can = float(pred.get("can_beat", p_ordinary + p_bomb))
+
+        y_ordinary = 1.0 if truth == "ordinary" else 0.0
+        y_bomb = 1.0 if truth == "bomb_only" else 0.0
+        y_unbeatable = 1.0 if truth == "unbeatable" else 0.0
+        y_can = 0.0 if truth == "unbeatable" else 1.0
+
+        binary_terms.append((p_can - y_can) ** 2)
+        multiclass_terms.append(
+            (
+                (p_ordinary - y_ordinary) ** 2
+                + (p_bomb - y_bomb) ** 2
+                + (p_unbeatable - y_unbeatable) ** 2
+            ) / 3.0
+        )
+        pred_can.append(p_can)
+        actual_can.append(y_can)
+        pred_ordinary.append(p_ordinary)
+        pred_bomb.append(p_bomb)
+        pred_unbeatable.append(p_unbeatable)
+        actual_ordinary.append(y_ordinary)
+        actual_bomb.append(y_bomb)
+        actual_unbeatable.append(y_unbeatable)
+
+    return {
+        "n": len(rows),
+        "brier_can_beat": sum(binary_terms) / len(binary_terms),
+        "brier_3way": sum(multiclass_terms) / len(multiclass_terms),
+        "pred_can_beat": sum(pred_can) / len(pred_can),
+        "actual_can_beat": sum(actual_can) / len(actual_can),
+        "pred_ordinary": sum(pred_ordinary) / len(pred_ordinary),
+        "actual_ordinary": sum(actual_ordinary) / len(actual_ordinary),
+        "pred_bomb_only": sum(pred_bomb) / len(pred_bomb),
+        "actual_bomb_only": sum(actual_bomb) / len(actual_bomb),
+        "pred_unbeatable": sum(pred_unbeatable) / len(pred_unbeatable),
+        "actual_unbeatable": sum(actual_unbeatable) / len(actual_unbeatable),
+    }
+
+
+def print_response_score(label, rows):
+    score = aggregate_response(rows)
+    if score is None:
+        print(f"{label}: no data")
+        return
+    print(
+        f"{label}: n={score['n']} "
+        f"Brier(can)={score['brier_can_beat']:.4f} "
+        f"Brier(3way)={score['brier_3way']:.4f}"
+    )
+    print(
+        f"  can beat: pred={score['pred_can_beat']:.1%} "
+        f"actual={score['actual_can_beat']:.1%}"
+    )
+    print(
+        f"  ordinary: pred={score['pred_ordinary']:.1%} "
+        f"actual={score['actual_ordinary']:.1%}; "
+        f"bomb-only: pred={score['pred_bomb_only']:.1%} "
+        f"actual={score['actual_bomb_only']:.1%}; "
+        f"unbeatable: pred={score['pred_unbeatable']:.1%} "
+        f"actual={score['actual_unbeatable']:.1%}"
+    )
+
+
 def replay_audit(audit, params, sample_count):
     engine = HandInferenceEngine(
         my_position=audit["my_position"],
@@ -329,6 +538,31 @@ def main():
 
     overall = aggregate(all_scores)
     print("\n当前保存后验总体评分:", overall)
+
+    response = response_rows(audits)
+    print("\n=== 候选动作响应概率校准 ===")
+    print_response_score(
+        "enemy aggregate",
+        [row for row in response if row["scope"] == "enemy_aggregate"],
+    )
+    for position in ("landlord_up", "landlord", "landlord_down"):
+        print_response_score(
+            position,
+            [
+                row for row in response
+                if row["scope"] == "player"
+                and row["position"] == position
+            ],
+        )
+    for relation in ("enemy", "teammate"):
+        print_response_score(
+            relation,
+            [
+                row for row in response
+                if row["scope"] == "player"
+                and row["relation"] == relation
+            ],
+        )
 
     if args.tune:
         tune(audits, max(200, args.sample_count))
