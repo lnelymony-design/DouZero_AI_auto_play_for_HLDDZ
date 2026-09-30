@@ -1,6 +1,6 @@
 import unittest
 
-from inference.risk_adjustment import adjust_candidates
+from inference.risk_adjustment import adjust_candidates, select_safer_alternative
 
 
 class RiskAdjustmentTests(unittest.TestCase):
@@ -80,6 +80,55 @@ class RiskAdjustmentTests(unittest.TestCase):
         # below 50%, so DouZero remains the majority signal.
         top = next(item for item in result if item.adjusted_rank == 1)
         self.assertEqual(top.action, "K")
+
+    def test_safer_alternative_requires_material_risk_gain(self):
+        alt = select_safer_alternative(
+            [
+                ("top", 1.00, 0.70),
+                ("second", 0.99, 0.55),
+                ("third", 0.90, 0.10),
+            ],
+            min_risk_gain=0.20,
+            max_model_gap_fraction=0.35,
+        )
+        self.assertIsNone(alt)
+
+    def test_safer_alternative_can_flag_close_low_risk_move(self):
+        alt = select_safer_alternative(
+            [
+                ("top", 1.00, 0.80),
+                ("second", 0.98, 0.35),
+                ("third", 0.90, 0.20),
+            ],
+            min_risk_gain=0.20,
+            max_model_gap_fraction=0.35,
+        )
+        self.assertIsNotNone(alt)
+        self.assertEqual(alt.action, "second")
+        self.assertEqual(alt.model_rank, 2)
+        self.assertAlmostEqual(alt.risk_gain, 0.45)
+
+    def test_safer_alternative_never_promotes_far_model_choice(self):
+        alt = select_safer_alternative(
+            [
+                ("top", 1.00, 0.95),
+                ("second", 0.80, 0.90),
+                ("bottom", 0.00, 0.00),
+            ],
+            min_risk_gain=0.20,
+            max_model_gap_fraction=0.35,
+        )
+        self.assertIsNone(alt)
+
+    def test_safer_alternative_does_not_compare_pass_risk(self):
+        alt = select_safer_alternative(
+            [
+                ("Pass", 1.00, None),
+                ("A", 0.99, 0.00),
+                ("K", 0.50, 0.00),
+            ]
+        )
+        self.assertIsNone(alt)
 
 
 if __name__ == "__main__":
