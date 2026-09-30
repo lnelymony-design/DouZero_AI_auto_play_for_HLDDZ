@@ -57,5 +57,8 @@
     "inference_play_behavior_floor": 0.18,
     "inference_play_behavior_strength": 1,
     "inference_behavior_temperature": 0.75,
-    "inference_min_effective_sample_ratio": 0.28
+    "inference_min_effective_sample_ratio": 0.28,
+    "risk_adjustment_enabled": true,
+    "risk_adjustment_weight": 0.3,
+    "risk_adjustment_min_ess_ratio": 0.4
 }
