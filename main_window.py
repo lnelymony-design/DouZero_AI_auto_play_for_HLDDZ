@@ -2,6 +2,7 @@ from PyQt5 import QtWidgets, QtGui, QtCore
 
 from constants import AutomaticModeEnum, RealCards
 from helpers.ScreenHelper import ScreenHelper
+from hud_overlay import HudOverlayManager
 from worker import WorkerThread
 
 
@@ -33,6 +34,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.workerThread = None
         self.observedRemainingCounts = {}
         self.currentMyPosition = None
+        self.lastInferenceResult = {}
         self.bid_threshold = 0.6
         self.redouble_threshold = 0.65
         self.super_redouble_threshold = 0.7
@@ -42,6 +44,11 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.automatic_mode = AutomaticModeEnum.FULL.value
         self.screenHelper.setWindowSize()
+
+        # Detachable HUD is presentation-only. It subscribes to the already
+        # validated state/inference signals and never participates in recognition.
+        self.hudManager = HudOverlayManager(self)
+        self._sync_hud_buttons()
 
     # 禁用窗口拖拽和缩放
     def resizeEvent(self, event):
@@ -69,6 +76,39 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_cbMode_selection_changed(self):
         current_value = self.cbMode.currentData()
         self.automatic_mode = AutomaticModeEnum(current_value).value
+
+    def _sync_hud_buttons(self):
+        if not hasattr(self, "hudManager"):
+            return
+        if hasattr(self, "hudEditBtn"):
+            self.hudEditBtn.setText(
+                "HUD锁定" if self.hudManager.edit_mode else "HUD编辑"
+            )
+        if hasattr(self, "hudVisibleBtn"):
+            self.hudVisibleBtn.setText(
+                "HUD隐藏" if self.hudManager.visible else "HUD显示"
+            )
+
+    def handle_hud_edit_clicked(self):
+        if not hasattr(self, "hudManager"):
+            return
+        self.hudManager.toggle_edit_mode()
+        self._sync_hud_buttons()
+
+    def handle_hud_visible_clicked(self):
+        if not hasattr(self, "hudManager"):
+            return
+        self.hudManager.toggle_visible()
+        self._sync_hud_buttons()
+
+    def _update_hud_inference(self):
+        if not hasattr(self, "hudManager"):
+            return
+        self.hudManager.update_inference(
+            self.lastInferenceResult,
+            self._side_position_map(),
+            self.observedRemainingCounts,
+        )
 
     def set_status(self, running):
         self.cbBid.setEnabled(not running)
@@ -118,6 +158,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event):
         self.stop_worker_thread()
+        if hasattr(self, "hudManager"):
+            self.hudManager.close()
         event.accept()
 
     @staticmethod
@@ -128,6 +170,9 @@ class MainWindow(QtWidgets.QMainWindow):
         return " ".join(display_map.get(card, card) for card in cards)
 
     def handle_card_recorder_update(self, result):
+        if hasattr(self, "hudManager"):
+            self.hudManager.update_counter(result)
+
         font = QtGui.QFont("微软雅黑", 10, QtGui.QFont.Bold)
 
         for i in range(15):
@@ -160,6 +205,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.myPositionLabel.setText('---')
             self._refresh_inference_side_labels()
             self._refresh_suggestion_side_headers()
+            self._update_hud_inference()
             return
 
         self.currentMyPosition = result
@@ -173,8 +219,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.myPositionLabel.setText(posotionTextMap[result])
         self._refresh_inference_side_labels()
         self._refresh_suggestion_side_headers()
+        self._update_hud_inference()
 
     def handle_ai_suggestion_update(self, result):
+        if hasattr(self, "hudManager"):
+            self.hudManager.update_suggestion(result)
+
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
 
         def clear_rows(paused=False):
@@ -479,6 +529,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.observedRemainingCounts.update(result)
         self._render_remaining_counts()
+        self._update_hud_inference()
 
     def _render_remaining_counts(self):
         side_map = self._side_position_map()
@@ -505,6 +556,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.inferenceTable.setItem(row, 1, item)
 
     def handle_hand_inference_update(self, result):
+        self.lastInferenceResult = result if isinstance(result, dict) else {}
+        self._update_hud_inference()
+
         if not result or not result.get("players"):
             self.inferenceMetaLabel.setText("样本 - · Pass - · 状态等待")
             self.inferenceRiskLabel.setText("重点牌型：等待牌局状态")
@@ -1088,12 +1142,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.cbMode.setFixedHeight(40)
         self.cbMode.currentIndexChanged.connect(self.handle_cbMode_selection_changed)
 
+        self.hudEditBtn = QtWidgets.QPushButton("HUD锁定", self)
+        self.hudEditBtn.setFont(font)
+        self.hudEditBtn.setFixedWidth(100)
+        self.hudEditBtn.setFixedHeight(40)
+        self.hudEditBtn.clicked.connect(self.handle_hud_edit_clicked)
+
+        self.hudVisibleBtn = QtWidgets.QPushButton("HUD隐藏", self)
+        self.hudVisibleBtn.setFont(font)
+        self.hudVisibleBtn.setFixedWidth(100)
+        self.hudVisibleBtn.setFixedHeight(40)
+        self.hudVisibleBtn.clicked.connect(self.handle_hud_visible_clicked)
+
         self.startBtn = QtWidgets.QPushButton("启动", self)
         self.startBtn.setFont(font)
         self.startBtn.setFixedWidth(120)
         self.startBtn.setFixedHeight(40)
         self.startBtn.clicked.connect(self.handle_startBtn_clicked)
 
+        right_layout.addWidget(self.hudEditBtn)
+        right_layout.addWidget(self.hudVisibleBtn)
         right_layout.addWidget(self.cbMode)
         right_layout.addWidget(self.startBtn)
 
