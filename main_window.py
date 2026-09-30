@@ -9,7 +9,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.screenHelper = ScreenHelper()
-        self.max_width = 820
+        self.max_width = 880
         self.max_height = 650
 
         if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
@@ -176,18 +176,14 @@ class MainWindow(QtWidgets.QMainWindow):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
 
         def clear_rows(paused=False):
-            for row in range(1, 5):
-                for col in range(4):
+            for row in range(1, 4):
+                for col in range(5):
                     value = "状态暂停" if paused and row == 1 and col == 0 else "-"
                     item = QtWidgets.QTableWidgetItem(value)
                     item.setFont(font_content)
                     item.setTextAlignment(QtCore.Qt.AlignCenter)
                     if paused and row == 1 and col == 0:
                         item.setForeground(QtGui.QColor("#d00000"))
-                        item.setToolTip(
-                            "识别历史与DouZero环境暂时无法一致重建；"
-                            "识牌和概率推断仍在继续"
-                        )
                     self.suggestionTable.setItem(row, col, item)
 
         if (
@@ -204,14 +200,14 @@ class MainWindow(QtWidgets.QMainWindow):
             clear_rows()
             return
 
-        for i in range(4):
-            data = result[i] if len(result) > i else ("-", "-", "-", "-", None, None)
+        for i in range(3):
+            data = result[i] if len(result) > i else ("-", "-", "-", "-", "-", None)
             action_raw = data[0] if len(data) > 0 else "-"
             score_text = data[1] if len(data) > 1 else "-"
-            risk_text = data[2] if len(data) > 2 else "-"
-            adjusted_text = data[3] if len(data) > 3 else "-"
-            model_rank = data[4] if len(data) > 4 else None
-            adjusted_rank = data[5] if len(data) > 5 else None
+            total_text = data[2] if len(data) > 2 else "-"
+            ordinary_text = data[3] if len(data) > 3 else "-"
+            bomb_text = data[4] if len(data) > 4 else "-"
+            model_rank = data[5] if len(data) > 5 else None
 
             action_text = action_raw
             if isinstance(action_raw, str) and action_raw not in ("-", "Pass"):
@@ -219,70 +215,43 @@ class MainWindow(QtWidgets.QMainWindow):
             elif action_raw == "Pass":
                 action_text = "不出"
 
-            action_item = QtWidgets.QTableWidgetItem(action_text)
-            action_item.setFont(font_content)
-            action_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            action_item.setForeground(QtGui.QColor("#0066cc"))
-            if model_rank is not None:
-                adjusted_desc = (
-                    "风险调整未启用"
-                    if adjusted_rank is None
-                    else f"风险调整第 {adjusted_rank}"
-                )
-                action_item.setToolTip(
-                    f"原DouZero第 {model_rank}；{adjusted_desc}\n"
-                    f"完整动作：{action_text}"
-                )
-            self.suggestionTable.setItem(i + 1, 0, action_item)
+            values = [action_text, score_text, total_text, ordinary_text, bomb_text]
+            for col, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                item.setFont(font_content)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
 
-            score_item = QtWidgets.QTableWidgetItem(str(score_text))
-            score_item.setFont(font_content)
-            score_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            score_item.setToolTip("DouZero原始候选模型分；不是校准后的胜率")
-            if score_text != "-":
-                try:
-                    score = float(score_text)
+                if col == 0:
+                    item.setForeground(QtGui.QColor("#0066cc"))
+                    if model_rank is not None:
+                        item.setToolTip(f"DouZero原模型第 {model_rank} 候选")
+                elif col == 1:
+                    item.setToolTip("DouZero原始候选模型分；不是校准后的胜率")
                     if model_rank == 1:
-                        score_item.setForeground(QtGui.QColor("#0066cc"))
-                    elif score < 0:
-                        score_item.setForeground(QtGui.QColor("#808080"))
-                except (TypeError, ValueError):
-                    pass
-            self.suggestionTable.setItem(i + 1, 1, score_item)
+                        item.setForeground(QtGui.QColor("#0066cc"))
+                elif col in (2, 3, 4):
+                    tips = {
+                        2: "敌方存在任意合法压制手段的后验概率",
+                        3: "敌方无需炸弹/王炸即可压住的后验概率",
+                        4: "敌方只有动用炸弹或王炸才能压住的后验概率",
+                    }
+                    item.setToolTip(tips[col] + "；均不是胜率")
+                    if isinstance(value, str) and value.endswith("%"):
+                        try:
+                            p = float(value[:-1]) / 100.0
+                            if col in (2, 3):
+                                if p >= 0.75:
+                                    item.setForeground(QtGui.QColor("#d00000"))
+                                elif p >= 0.50:
+                                    item.setForeground(QtGui.QColor("#c26b00"))
+                                elif p <= 0.20:
+                                    item.setForeground(QtGui.QColor("#008000"))
+                            elif col == 4 and p >= 0.10:
+                                item.setForeground(QtGui.QColor("#7a3db8"))
+                        except ValueError:
+                            pass
 
-            risk_item = QtWidgets.QTableWidgetItem(str(risk_text))
-            risk_item.setFont(font_content)
-            risk_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            risk_item.setToolTip(
-                "隐藏手牌后验样本中，敌方至少有一手合法牌能压住该动作的比例；"
-                "不是胜率，也不代表敌方一定会出"
-            )
-            if isinstance(risk_text, str) and risk_text.endswith("%"):
-                try:
-                    risk = float(risk_text[:-1]) / 100.0
-                    if risk >= 0.75:
-                        risk_item.setForeground(QtGui.QColor("#d00000"))
-                    elif risk >= 0.50:
-                        risk_item.setForeground(QtGui.QColor("#c26b00"))
-                    elif risk <= 0.20:
-                        risk_item.setForeground(QtGui.QColor("#008000"))
-                except ValueError:
-                    pass
-            self.suggestionTable.setItem(i + 1, 2, risk_item)
-
-            adjusted_display = str(adjusted_text)
-            if adjusted_rank == 1 and adjusted_text != "-":
-                adjusted_display = f"#1 {adjusted_text}"
-            adjusted_item = QtWidgets.QTableWidgetItem(adjusted_display)
-            adjusted_item.setFont(font_content)
-            adjusted_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            adjusted_item.setToolTip(
-                "风险调整相对分（0–100）：当前候选集内的模型分归一化后，"
-                "再加入敌方可压风险。它不是胜率。"
-            )
-            if adjusted_rank == 1:
-                adjusted_item.setForeground(QtGui.QColor("#008000"))
-            self.suggestionTable.setItem(i + 1, 3, adjusted_item)
+                self.suggestionTable.setItem(i + 1, col, item)
 
     def handle_bid_win_rate_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
@@ -890,29 +859,29 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def create_suggestion_table(self):
         self.suggestionTable = QtWidgets.QTableWidget(self)
-        self.suggestionTable.setGeometry(0, 209, 320, 150)
-        self.suggestionTable.setFixedSize(320, 150)
-        self.suggestionTable.setRowCount(5)
-        self.suggestionTable.setColumnCount(4)
+        self.suggestionTable.setGeometry(0, 209, 360, 150)
+        self.suggestionTable.setFixedSize(360, 150)
+        self.suggestionTable.setRowCount(4)
+        self.suggestionTable.setColumnCount(5)
 
         self.suggestionTable.verticalHeader().setVisible(False)
         self.suggestionTable.horizontalHeader().setVisible(False)
         self.suggestionTable.setShowGrid(False)
 
-        for row in range(5):
-            self.suggestionTable.setRowHeight(row, 28)
+        for row in range(4):
+            self.suggestionTable.setRowHeight(row, 33)
 
-        self.suggestionTable.setColumnWidth(0, 126)
+        self.suggestionTable.setColumnWidth(0, 120)
         self.suggestionTable.setColumnWidth(1, 56)
-        self.suggestionTable.setColumnWidth(2, 62)
-        self.suggestionTable.setColumnWidth(3, 72)
+        self.suggestionTable.setColumnWidth(2, 60)
+        self.suggestionTable.setColumnWidth(3, 64)
+        self.suggestionTable.setColumnWidth(4, 60)
 
-        headers = ['候选', '模型分', '可压', '调后分']
+        headers = ['候选', '模型分', '总可压', '普通压', '仅炸压']
         contents = [
-            ('-', '-', '-', '-'),
-            ('-', '-', '-', '-'),
-            ('-', '-', '-', '-'),
-            ('-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-'),
         ]
 
         font_header = QtGui.QFont("微软雅黑", 8)
@@ -935,16 +904,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.suggestionTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.suggestionTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.suggestionTable.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-
         self.suggestionTable.setStyleSheet("""
-            QTableWidget::item {
-                background-color: #F3F3F3;
-            }
-            QTableWidget::item:alternate {
-                background-color: #E3E3E3;
-            }
+            QTableWidget::item { background-color: #F3F3F3; }
+            QTableWidget::item:alternate { background-color: #E3E3E3; }
         """)
-
         self.suggestionTable.setAlternatingRowColors(True)
 
     def create_played_card_table(self):
