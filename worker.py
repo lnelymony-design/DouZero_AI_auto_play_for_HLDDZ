@@ -884,6 +884,9 @@ class WorkerThread(QThread):
                 play_behavior_strength=self.config.inference_play_behavior_strength,
                 behavior_temperature=self.config.inference_behavior_temperature,
                 min_effective_sample_ratio=self.config.inference_min_effective_sample_ratio,
+                residual_behavior_floor=self.config.inference_residual_behavior_floor,
+                residual_behavior_strength=self.config.inference_residual_behavior_strength,
+                residual_behavior_temperature=self.config.inference_residual_behavior_temperature,
             )
 
             # Build the original DouZero environment from the same confirmed
