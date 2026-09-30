@@ -204,6 +204,49 @@ class HandInferenceEngineTests(unittest.TestCase):
             result["behavior_temperature_configured"],
         )
 
+    def test_response_profile_separates_ordinary_bomb_only_and_unbeatable(self):
+        engine = HandInferenceEngine(
+            my_position="landlord",
+            my_hand_cards="DX222AAAKKKQQQJJJTT",
+            sample_count=200,
+            random_seed=1,
+        )
+        engine._latest_weighted_samples = [
+            (
+                {
+                    "landlord_up": "A",
+                    "landlord_down": "3",
+                },
+                1.0,
+            ),
+            (
+                {
+                    "landlord_up": "3333",
+                    "landlord_down": "4",
+                },
+                1.0,
+            ),
+            (
+                {
+                    "landlord_up": "Q",
+                    "landlord_down": "J",
+                },
+                1.0,
+            ),
+        ]
+        engine._latest_total_weight = 3.0
+
+        profile = engine.response_profile("K", max_samples=320)
+        self.assertAlmostEqual(profile["ordinary_beat"], 1 / 3, places=6)
+        self.assertAlmostEqual(profile["bomb_only"], 1 / 3, places=6)
+        self.assertAlmostEqual(profile["unbeatable"], 1 / 3, places=6)
+        self.assertAlmostEqual(profile["can_beat"], 2 / 3, places=6)
+        self.assertAlmostEqual(
+            profile["pressure"],
+            (1 / 3) + 0.35 * (1 / 3),
+            places=6,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
