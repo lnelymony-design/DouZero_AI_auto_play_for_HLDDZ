@@ -864,16 +864,12 @@ class WorkerThread(QThread):
 
                 if (
                     round_boundary_seen
-                    and raw_hand
-                    and len(raw_hand) in (17, 20)
-                    and (
-                        raw_counts.get("left") is not None
-                        or raw_counts.get("right") is not None
-                    )
+                    and init_hand is not None
+                    and len(init_hand) in (17, 20)
                 ):
                     print(
-                        f"[ROUND/START] 检测到新一局牌面候选："
-                        f"我的手牌 {len(raw_hand)} 张，"
+                        f"[ROUND/START] 检测到新一局稳定牌面："
+                        f"我的手牌 {len(init_hand)} 张，"
                         f"左={raw_counts.get('left')}，右={raw_counts.get('right')}"
                     )
                     round_boundary_seen = False
@@ -1046,11 +1042,32 @@ class WorkerThread(QThread):
                             f"stable={position_code} 连续={role_pending}/3 "
                             f"committed={last_state['position_code']}"
                         )
+                        bottom_debug = getattr(
+                            recognizer, "last_bottom_debug", None
+                        )
+                        slot_debug = ""
+                        if bottom_debug:
+                            parts = []
+                            for item in bottom_debug:
+                                rank = item.get("rank")
+                                rank_text = display_cards(rank) if rank else "-"
+                                score = item.get("score")
+                                score_text = (
+                                    "-" if score is None
+                                    else f"{float(score):.2f}"
+                                )
+                                source = item.get("source", "-")
+                                parts.append(
+                                    f"S{item.get('slot')}={rank_text}"
+                                    f"/{score_text}/{source}"
+                                )
+                            slot_debug = " | slots " + " ".join(parts)
                         print(
                             f"[INIT/BOTTOM] raw={display_cards(raw_bottom)} "
                             f"stable={display_cards(top_bottom)} "
                             f"连续={bottom_pending}/2 "
                             f"committed={display_cards(last_state['three_cards'])}"
+                            f"{slot_debug}"
                         )
                         if wait_reasons:
                             print("[INIT/WAIT] " + "；".join(wait_reasons))
