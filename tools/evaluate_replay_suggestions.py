@@ -109,7 +109,13 @@ def parse_replay(path):
     }
 
 
-def evaluate_one(replay, weights, sample_count=1000, min_ess=0.40):
+def evaluate_one(
+    replay,
+    weights,
+    sample_count=1000,
+    min_ess=0.40,
+    max_candidates=3,
+):
     position_code = replay["position_code"]
     my_position = POSITIONS[position_code]
 
@@ -155,7 +161,7 @@ def evaluate_one(replay, weights, sample_count=1000, min_ess=0.40):
                 action=None,
                 update=False,
             )
-            candidate_pool = action_list[:6]
+            candidate_pool = action_list[:max_candidates]
             triplets = []
             for action_text, score_text in candidate_pool:
                 risk = (
@@ -278,6 +284,12 @@ def main():
     )
     parser.add_argument("--samples", type=int, default=1000)
     parser.add_argument("--min-ess", type=float, default=0.40)
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=3,
+        help="Only risk-adjust this many top DouZero candidates.",
+    )
     args = parser.parse_args()
 
     total = {}
@@ -290,6 +302,7 @@ def main():
                 args.weights,
                 sample_count=args.samples,
                 min_ess=args.min_ess,
+                max_candidates=max(1, args.max_candidates),
             )
         except Exception as exc:
             print(f"  SKIP: {exc}")
