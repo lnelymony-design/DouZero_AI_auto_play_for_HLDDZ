@@ -201,6 +201,7 @@ class WorkerThread(QThread):
             "left": {"cards": "", "time": 0.0},
             "right": {"cards": "", "time": 0.0},
         }
+        recent_self_plays = []
         count_missing_frames = {"left": 0, "right": 0}
         self_hand_missing_frames = 0
         pass_latched = {"left": False, "right": False, "me": False}
@@ -581,6 +582,7 @@ class WorkerThread(QThread):
                 pass_latched[side] = False
             for side in recent_play:
                 recent_play[side] = {"cards": "", "time": 0.0}
+            recent_self_plays.clear()
 
             print()
             print("===== 微信牌局状态已初始化 =====")
@@ -775,6 +777,23 @@ class WorkerThread(QThread):
                     if cards:
                         recent_play[side] = {"cards": cards, "time": now}
 
+                self_visual = stable_value(
+                    "me_play_candidate", played_values.get("me", ""), frames=2
+                )
+                if self_visual and is_legal_play(self_visual):
+                    if (
+                        not recent_self_plays
+                        or recent_self_plays[-1]["cards"] != self_visual
+                    ):
+                        recent_self_plays.append(
+                            {"cards": self_visual, "time": now}
+                        )
+                recent_self_plays[:] = [
+                    item
+                    for item in recent_self_plays
+                    if now - item["time"] <= 6.0
+                ]
+
                 # Prefer an action from the currently expected seat.  If a later
                 # seat has hard evidence, skipped seats are logically Pass.
                 self_removed = None
@@ -786,40 +805,57 @@ class WorkerThread(QThread):
                         confirmed_my_hand = live_hand
                         self_removed = None
                     elif self_removed and not is_legal_play(self_removed):
-                        # A raised/animated remaining card can disappear from the
-                        # hand OCR for a few frames, turning a legal KK into an
-                        # impossible KK7 delta.  In that case, allow the table
-                        # play to repair the delta only when it is itself legal
-                        # and is a strict multiset subset of the confirmed hand.
-                        visual_candidate = played_values.get("me") or ""
+                        # The after-hand OCR can temporarily miss a raised card,
+                        # e.g. a real KK play appears as an impossible KK7 delta.
+                        # Do not trust the *current* table image: it may already
+                        # contain a later/stale card.  Search only legal table
+                        # plays cached since our previous committed action, and
+                        # require them to be a multiset subset of the illegal
+                        # hand delta.  Prefer the largest candidate, newest on tie.
+                        delta_counter = Counter(self_removed)
                         confirmed_counter = Counter(confirmed_my_hand)
-                        visual_counter = Counter(visual_candidate)
-                        visual_is_subset = bool(visual_candidate) and all(
-                            visual_counter[card] <= confirmed_counter[card]
-                            for card in visual_counter
-                        )
-                        if (
-                            visual_is_subset
-                            and is_legal_play(visual_candidate)
-                        ):
+                        candidates = []
+                        for item in recent_self_plays:
+                            candidate = item["cards"]
+                            candidate_counter = Counter(candidate)
+                            if not candidate or not is_legal_play(candidate):
+                                continue
+                            if not all(
+                                candidate_counter[card] <= delta_counter[card]
+                                for card in candidate_counter
+                            ):
+                                continue
+                            if not all(
+                                candidate_counter[card] <= confirmed_counter[card]
+                                for card in candidate_counter
+                            ):
+                                continue
+                            candidates.append(item)
+
+                        if candidates:
+                            best = max(
+                                candidates,
+                                key=lambda item: (
+                                    len(item["cards"]), item["time"]
+                                ),
+                            )
+                            visual_candidate = best["cards"]
                             corrected_after = remove_chars_from_string(
                                 confirmed_my_hand, visual_candidate
                             )
-                            if len(corrected_after) < len(confirmed_my_hand):
-                                print(
-                                    f"我的出牌差分纠错 >>> 原差分 "
-                                    f"{display_cards(self_removed)} 非法；"
-                                    f"桌面确认 {display_cards(visual_candidate)}，"
-                                    "采用桌面合法牌型并反算剩余手牌"
-                                )
-                                self_removed = visual_candidate
-                                self_corrected_after = corrected_after
-                            else:
-                                self_removed = None
+                            print(
+                                f"我的出牌差分纠错 >>> 原差分 "
+                                f"{display_cards(self_removed)} 非法；"
+                                f"近期桌面合法候选 "
+                                f"{display_cards(visual_candidate)}，"
+                                "采用该牌型并反算剩余手牌"
+                            )
+                            self_removed = visual_candidate
+                            self_corrected_after = corrected_after
                         else:
                             print(
                                 f"手牌差分候选未采信 >>> {display_cards(self_removed)} "
-                                "不是合法牌型，等待下一帧"
+                                "不是合法牌型，且近期没有可验证的桌面候选"
                             )
                             self_removed = None
 
@@ -939,6 +975,7 @@ class WorkerThread(QThread):
                         )
                         self_removed = None
                         self_corrected_after = None
+                        recent_self_plays.clear()
                         expected_side = "right"
                         action_committed = True
                         if self_final_out or not confirmed_my_hand:
