@@ -492,6 +492,13 @@ class WorkerThread(QThread):
                 my_position=self.my_position,
                 my_hand_cards=my_hand,
                 three_landlord_cards=three_cards,
+                sample_count=self.config.inference_sample_count,
+                pass_penalty=self.config.inference_pass_penalty,
+                friendly_pass_penalty=self.config.inference_friendly_pass_penalty,
+                play_behavior_floor=self.config.inference_play_behavior_floor,
+                play_behavior_strength=self.config.inference_play_behavior_strength,
+                behavior_temperature=self.config.inference_behavior_temperature,
+                min_effective_sample_ratio=self.config.inference_min_effective_sample_ratio,
             )
 
             # Build the original DouZero environment from the same confirmed
@@ -1032,6 +1039,13 @@ class WorkerThread(QThread):
             my_position=self.my_position,
             my_hand_cards=self.my_hand_cards,
             three_landlord_cards=self.three_cards,
+            sample_count=self.config.inference_sample_count,
+            pass_penalty=self.config.inference_pass_penalty,
+            friendly_pass_penalty=self.config.inference_friendly_pass_penalty,
+            play_behavior_floor=self.config.inference_play_behavior_floor,
+            play_behavior_strength=self.config.inference_play_behavior_strength,
+            behavior_temperature=self.config.inference_behavior_temperature,
+            min_effective_sample_ratio=self.config.inference_min_effective_sample_ratio,
         )
         self.refresh_hand_inference()
         print()
