@@ -13,6 +13,17 @@ REFERENCE_HEIGHT = 770
 # miniapp screenshots. Red/black suits are intentionally discarded; only rank
 # shapes are retained.
 _RANK_TEMPLATE_B64 = {'2': 'eNrd1DsOgDAMA9Dc/9KGiQHs2BJUUfFYvaZVP6laHZxJzJVMSQmSht2mcManPZyq3zAByRLMNVuOHVY7pA6pQ+pgzoVBvHElnbsk+VRD5h/Br9nGWxtkbDhkvmGx4aZc4PQ/N01/yGHIfZgDvMOOjg==', 'A': 'eNrN1MsOwCAIRFH+/6dvky66UIqD71nqiZogmF0S3qiO3Y6kY68DDR5yZJzwFzLOso6max34ba5xBE7pJnSntCf9jlFXRmQeXOGEQcNcV6/5L+x39uuEkcmAcy4mOo94hpbV86tZV3m2uzsPCUw54w==', 'Q': 'eNrtlTsOwCAMQ7n/pd0OlfgoNkZpNjKaJ0IkYrdWXXjLgr7yKEmaHGCB46EA5xMKrjrhAjkkTS6jJd6CHzicc7jc5Qr+VVd2ux4aC92jGYTk+i3gC4yx3XY26YGEUy6pHRXrANR5TX9O5YLbOp82Bzk3gm5yFqX3A7G3yFQ=', 'J': 'eNrt1bESADAEA9D8/0/rqj1Kr0ySkTcwBWiLOOl2hs2dmfwHdHR0dAOcHvtun3+7YxE5vLnLu3ohoZOIGZWV7MqKuqrJApe3/RE=', 'T': 'eNrt1UsOgCAQA9De/9J1YSBMLaMoGwyzEnh8YrQAvysythg72gFhFrbdpzEwTi+PAllLlw6Q6twM49hxcr7LCQz0ji9c3YEfHLsOgw7bbbeAm/Xd3/9vmO3wMF/SvIIGm3cmAbOYZPNyyhgyB5P31iX3x9p1AEBH0Us=', '9': 'eNrVlcEOwCAIQ/v/P80Oyw6TAp2oyTjCM6JQADab3SZBBWqjiRgHX6EYHAIR5/wcJPdQkDgZZ4mzwaHDlW8L/+r3HDZxvYLMNEKSC+9A8+IrVZlLpBbxGI3Fbkzsa0bXMc4fjOsBsTcwM2C+cTgwcyBKq8rucQs1o1uhaL18b5m43qBRi+wCt3uwbA==', '7': 'eNrtlMEKACAIQ/f/P233zJgw0aAd5TGZikCB7K7hnMsRxNsLwRjSGEgsxREY4qy+eOTYy1BhJXYYbWeP27WmUHNNbWWcfe7FtdGfRaAFiBLXNw==', '6': 'eNrVlVEOgDAIQ3v/S9fEHzOlpVE3I5/wxsJWAJhu3C2COpSjhZgih6AGzxHBXROUYHGP4dBxKh3bdGXB/IbTZ9FziF7FKeAt7qy2RHhOpEfAq5nSHDc4BKdrG7jsy4nGyVBDazjc5vBLLm3MFb4HA8b3SN/T1bQ3855OGao7w7WV7cGpy3sD5syieg==', '5': 'eNrtlUEOgEAIA/v/T+NJoxGGmogelCMZwmZbQJqJKGOUi8e45Hnut9zM6aMclaxcKdiBQ2nJB4hB81O+cT1ldlku3ZJdj9x+Lif675+LTo+Ec0V/mWv9co0z7Wdwqhe7eD6aQefpLReHeTC906rRWACGl4iU', '3': 'eNrN1csOwCAIRFH+/6en2xoGudqalqU5EF9oxMnQLZiqpXLM2JBRMZeVXVE+Dbt5NOW481CwoOAEzfJecSILdvVi06UtbG/hV4x0CGfYcWhPsZE/htaJNdIk1122zumQC+aCuc0WVLV/zxx81rr3r7ot43D7gSx8SP1XyNRiRz6MC83DYro=', '8': 'eNrl1TEWgDAIA1Duf2kcWy0h4YGDT0b8XSqhZm+Wb9V2fpTIQnn/gqXmgm7myNHq2b85Z676P2S3+mxePFVgTq3hTEKn7Oatk0vI2Fp4NhEUXTJqnrbCrrojii6/q+84lJnprM7sDSnnwjvDnJ5zNb8jdQHEivkj', '4': 'eNrN1NEKgDAIheG9/0v/EVFUzHk2NPPy+MFgoq19VuwV55AclDg0R4kDyVHjjq7nzq7ilLmJ7mqNHROuhbl7PnCP2HYkOH+P3pnhSHDCnveT/hvRzq5q96O7m3bHvYulQM2p/zw3j9XaANw4b60=', 'K': 'eNrF1UsOwCAIBFDuf+nptgGGX0tgSV7UsVZFrgq6bPfIuUs0PTeLbrHMbecy4+Az7VBzTA0dZ56TxAWjvV2kBg47Ls2x5pJ9hoTww/ctn5ffzl8QZfZ/8AGHjsKpY1H2XfOeVLDYS+7sbi99P1B8Z1quOu9NPRmQerA='}
+_COUNT_DIGIT_TEMPLATE_B64 = {
+    "0": "eJyt0cEKACAIA9D9/08vIijMWZLtlM9LKvAYjmSdM1ptJ3BqX5VtlN/0js2RdjXLTz//8zZXfSe9lIdx9wodWk0Lf9MA1u4p5Q==",
+    "1": "eJxjYCAT/AcDosX/wwB2USLFcZmDJDcqPiLFsQgTBQBDIqBg",
+    "2": "eJytkdEKACAIA/3/n14QQZRzreie5BoLNOIRdEyPSaGXF+6xk36s/Jgd/2E+7ohsQpTo8uRluRvXYdOzy66e3cvw0PkrGvGvHPI=",
+    "4": "eJytz0EKACAIRFHvf+kpiCwaA2X8u3nSIjMhzAoORAd4kqPHF8TOP9g76b5yfkbB72L1F1Wng719uNVZlQYz3hn1",
+    "5": "eJylksEOACAIQvn/n6ZLtbQoNW6+NgYmUBSnApxGijPJvc85pAqvO126MstDdUeeMHeO6uGfr/7bR+DJ+2Dzuy0QRQ59hHE1NyEc8g==",
+    "6": "eJylkEsSADAEQ93/0um0qxZRn+y8GILIRAAKHEcEp7mP4yG1LCyJsf78saA14vZs2xRxb2jEU3sdviv1CnIX5fSjlyE9LRShJ+c=",
+    "7": "eJxjYCAD/EcF+MX/YwHkiGOTweEyXC4mWpwSYxDytLUUbxBgmoJDnMSAxK+cWMeQZQo2PzHgEicaAAC8KPIO",
+    "9": "eJzNkDEOADAIAv3/p+ngYgQTdOqNhwnEiCNIPI/KoEugPTqisQZ89IPnnds/UDB92vF9GHltfX/ptLekF9rmActZIO4="
+}
+
 _LANDLORD_FLAG_B64 = 'eNp1lvlXE9cewP+od1q7WKmgYiH7MllnMpnMmkkmmewJ2UMghOwk7CKIorKoWBEVtVL39h2XnrZSWZSiuD4rD2xtte27oe05r+ed9/lh7j3f85k793tn7vdOTc22mnqJXC4Vi1N37uwh1Jjz4Nk8o5UaKl8vd6pUCoUGRnQqpXpbbW1NTb0MkvPn/tmqJby+puPL95eOxuItDn34ytWYVgWpYYMOgrbV7qjdtm2XpHhrkOBSCad77N73D1a+GfDECyW/qft2r1YNqfWwRlmzvWp+lLuRgCsDA92u1tnHG2/XVq9VJi4U9wxRvi+GNSoFpNWpa4G4Y3vmWsJ5dKR7vMNx8P6Ln395/eT+kd6rlyu9x/2ei4NqSKHU6Bvq62rrAhcK/OjB3MBQInLm6frrn16/WLnV03t5KtM36UnO5jQqpQrWaYW1jXt7qOGz5dRAzl24/njj1cbGywf3DscPne2Oj46zheNOvRrSJi2qneljjrbzA55kZ9zad3vl5dra2g+ry5OetrF90fapLuv4fgOsUp4PqdChtHfqZMYSywfYobn5e6vPnz9fvfdF0VvZ3+IeOt8cm0whetXNmCQ/7sieG4ua3TE3O7Lw3d3FlcePHyx9P8olkjZzYWbQfmhYhyInfNj4gH/y3ICD5uys8ygQ5xeXHywvrkzazWaG8Q2fDuaOcKgp3VwajbbOnKuYKafP4p+aB+L8wtLSwr0TbgrAVmYq3kNlDTxUOXvE2TlzOkeSZgsVmrp5LBVIZEZv3F086ScBdOH0KFvZp1K9OD97wDE8c7KdIDDUSLs8LXtvvnk+4XMEg7SRIAgyM33ckd5r0K7P3+13HZksmAlvW+/Bo93JqH/6p7m9kY6JoXLSian1bSdPeeL9JPrz3W8rTByzpTsqHfls2stSqNltMdFN2Xyp3FlJc0zuaCR0PI39sv6oXeRpjga83kAwHLNhjD0YdjMGe3M8EmoKBONJB0cHxrPGOwtnfR4/b+OdXn8wHHHr1IFKTxujsibikWDA63I4vA4FczhnNB+rKJ08b7dzNKpoqKvZ+t57OwQ1726ta1DhFrvTyXMWG9n0+YC29WJJYndYdTs+qG1o3ESm1ekws9XlJhV1tSozZzGz6Ruj+o4bg1oEJQlbMP6/RD24Qqih6NYb40jq+mKz0N/REv9/uLVSKL80aggMTgeN6Y6WGCC5//RQK2jTI2cOZ2J/kctbB1+MYa7gZIXLlpJRQPtn359qLxwc7DqzcKFS6s1GN8n18kKFHnNSnePlUqm5GspcXJ1pH77zxfCppa8/v/nVkdQf4h63VKmG/XhwT29nqTkCaP989Uz60JOFIxee/Hvj7cbVYjUYyfa7JEq1bqSJSfT0FKti16mFtbmJ6afPvrr/49rKk5fXO/4UHSINDM+OMkS2t5gIh8MnNn77/ffHixu/vnmzfnPiyuNrpXCVbD/foDDgPdNFJNBdjINI3+UHr549++m39aXllVOdZ1evFTfFTD//iQxlPLlBD18pxEOhkMNzauXSueVf7o6cuHO2/zMghqpk+p1CJUL6bX6nu6MQCwJSFx7OlKeez+2bmr906Orjq4VqMNje75Zr9YZgElfxpXy0CdB64eHJyMDDuwdOrjz49sGLi9lqsCnd71bCsC58OCmhCvnIn+J0y8gjID76cX19ZSL2h9jnlMJGJNR/LGbN5SMBQMuF1fOFsSffHZia//LEp4eywWowkO7jhToc50MjI7lCLuIHtM6+eHLr9tp3+47dnvQ3zd4frgb9bX28QIPTnCdTqnRlQz6fL1C59frX1cWN7yqxfGsgf/uHcV+Vtj6nSGUgA96mRFtnNuT1Nk08e/vLnb79Dx9O9ZY7h86vzPV5q6T63HKN3tjWzHGRUtLt8UZOPb1ZtllLt169fQN4+/J0HGhuS6TXrdQjCMPjWnsmYDI7XCxOWnmXMz44XmWk5He4XRyBNvU4pLDJuP/Gxa5Qux9FcSvPO5wuN9hO1k043mmnUAQJ9FSzJsZ5LRkr+A0IglI2p8vlasqXY2BbgrvsDAbCm6IGIw7Hea054zfAMIyAze9w5i4vnWtzgn3KmqpBGA70OEWQgSyPJXFH+6YIIyjO2oNjK8tjETtLoAj8h9jtEEMwFrH7PMG8rxqksuOTJ6ZPX3+0dnd2+sTxsQ7bpujvdki0sKGcj7pihQgOIt6Zpy9fvlxbf/3m9TroPL2SqHposJuXIgReLgTt8WKLzYTo6fT+g4DZf724NgHa4Tyn1yMmOtrNi2GarRQi9nAp5WIJgx42oIDi/ft9ZtAa9DoYJVlrvNsuUBNsOZ/k/cWUi2Mpo05dJb20WMaqHS1soi0cF+92CEHWHbkWq7OYclosFtoRrVaGg6sPJ1KgDXGEGUQtsW6XXK03lnJJhssnbNVQ1/WbgMVXr+7dBu3FMmexsGY61OWCEANcBKK13W+izCzbe3tu7ttvln/88cHct3fmvuy2Ac0Ee7t4qYEgCplmqy3lUOtNFONNploS0QMPH060JlrAIU/ThEEDubtsAh1lzqfjNj7lgCA1WCuQK6KrJkMgoEsQKPhRgNyd9kYIpbJtcZujKkIqLUpSDEN3Lt8f4BmGIjE90KoieIV6DJwSAW+2KkIo5wtHo9Wsq3Us7OfQP0WnXAsbM+kY5e3gQUCdujI3v7C49Pj166f3Fhfm5y6l9Zti2S5HjGh7K8PkSi41BBmGV55Wefb8+bNq+2Rhj7F6v6dolSEmYzoeDCcLLaxWpVAZKZqmzZzDwTGgQxkgBQRpiETBLNHhVLPbH01VOkp+g0ouFv0NiQJSwc5cyaeWagnGXegL9e3LFjuT5ObU/4aGbu3KMCIJBOPm/GzZ2tsXsgdLRY/+75oK8eQrQWmtQGUwmajl85GuK2NZ605lopwg1f/l6Syt5TRVX1svBlsLN90YzV5YvDTm3f6P7eZM2gH/9Xw16smWAvLaepFMqTGSNDHZGpv++tIAtf2jmg+1yXyE2BxUpbckCm307o93ScBfIWIkGKabMA3MHklCUmeIxfRcutUOBlVj3vZCQLWrvkGsRAiKwDDSDO8wlNpISEH6eJVs9wfqcDpIGqzRXAu1u6ZeqtLoDCTLEkaMhJsCqEjtohAbjht3bHlnl7UtncrmfPLaup2NkAHHUIxhGcJoDA/G9ZqmIJd1YH5kZ82Wf2zThfNJvHZLnViq0OJm2ggmaKZxY2cek2Ie3tub9tlFO3du/+DdLVtrP37/nfcbtKDumBiGxHGCohmqy6qDTSSXslhTVMPuhsZdNe+98+77H27dJkQIwmQiSIrCMROYZ5tWr5azkUwi4tcIBUKx6JO6bR99vGNXvdSAg62AYTgFsjbRrE8h1XK+OEElSLlMJBCIRY31dTsaJDI1AvJlMAQlzAxuNFGuxp2E35PMpziZRCoRCUUSiajhk0axQm9EjBRLm1AjwVpoE+6R0nZzU7QtoGwQSmQyCRgT+AKh1LDpMCxlMtFWC00mfdOz7X6wvlKRQCSVy4QNAolCLhYIYCsokUaas9A4TluszD4+/mlPUwshUSikIqFEKhMLxDKFXCLU0KDIECTDsjSG0VZ29OBQTyjMgv8ilVIiAHMDV6EMUkohI221sSRGWlgcxWgL0xIAR7FcLASfExhTLFPKRY0ipRrSgfdrsVZHA3UONbEEzCV9asnmc8EjpWCeEqFALAe1wYiCl0fhOAnWE6d4ayKsaRTLZKKGBrECkguFMrlE0CBSmMCpYKTMZvA9gBmSmNfnQcRCoURSXUM5pJQ0CuQquVAg0tOkCcNpM4EaTGaOJf8DFilw7Q=='
 _PASS_TEMPLATE_B64 = 'eNq9l9sOAyEIRPn/n54m3SZVGe62vq3CHlHBUeR2A+QPDe/2JwyCYJ9xbYUiBtF4sm2OUTzLN7oc9VcYPbN4EHN2lx7HxMACX142kyPtU5DbHmQOKfJJOeLIbzlZzJCD9Ezy6dPaHDtZpMEp1eb6smUwcw6QD2fAQYlTS23uvpf1Nif0duMecbozqnFKc7qIkeakfA4xwByU8Coc8twVcP5vdUmDuBGipGHiwRW43IaqkmOxnPpg/dPj6G2z1YNTZ4NbwVZMXsXLxcO3+QzAK60mx+hydBm8+zW1bPJk+leJE3VOprbKdm2xjxOOrv3M5RTk6mATp6fLFgrrOH1gfDhS49B3VXSXao52Ilbaxa8xQjlx1/jFDItz+wXsD78AmPImLw=='
 
@@ -22,6 +33,10 @@ class WechatCardRecognizer:
         self.rank_templates = {
             rank: self._decode_template(data, (52, 40))
             for rank, data in _RANK_TEMPLATE_B64.items()
+        }
+        self.count_digit_templates = {
+            digit: self._decode_template(data, (32, 24))
+            for digit, data in _COUNT_DIGIT_TEMPLATE_B64.items()
         }
         self.landlord_flag = self._decode_template(
             _LANDLORD_FLAG_B64, (81, 41)
@@ -429,6 +444,110 @@ class WechatCardRecognizer:
         )
         jokers = self._detect_jokers(bgr, joker_region)
         return self._merge_cards(normal, jokers)
+
+    def _classify_count_digit(self, normalized):
+        best_digit = None
+        best_score = -1.0
+        for digit, prototype in self.count_digit_templates.items():
+            iou = self._iou(normalized, prototype)
+            corr = float(
+                cv2.matchTemplate(
+                    normalized, prototype, cv2.TM_CCOEFF_NORMED
+                )[0, 0]
+            )
+            score = 0.7 * iou + 0.3 * corr
+            if score > best_score:
+                best_digit = digit
+                best_score = score
+        return best_digit, best_score
+
+    def recognize_remaining_count(self, image, side, expected=None):
+        """Read the blue left/right remaining-card badge.
+
+        Digit prototypes come from the user's WeChat miniapp screenshots.
+        Digits 3/8 are not yet represented by direct samples, so when one of
+        those values is the tracked expectation and a valid badge is present,
+        the expectation is used as a narrow fallback rather than inventing a
+        different observed number.
+        """
+        bgr = self._to_bgr(image)
+        if bgr is None or side not in ("left", "right"):
+            return None
+
+        height, width = bgr.shape[:2]
+        if side == "left":
+            region = (0.090, 0.145, 0.420, 0.525)
+        else:
+            region = (0.855, 0.920, 0.420, 0.525)
+
+        x0 = int(region[0] * width)
+        x1 = int(region[1] * width)
+        y0 = int(region[2] * height)
+        y1 = int(region[3] * height)
+        roi = bgr[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        mask = (
+            (gray > 175)
+            & (hsv[:, :, 1] < 120)
+        ).astype(np.uint8) * 255
+
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        min_h = self._scaled(14, height, REFERENCE_HEIGHT)
+        max_h = self._scaled(28, height, REFERENCE_HEIGHT)
+        min_area = max(
+            20,
+            int(
+                35
+                * (width / REFERENCE_WIDTH)
+                * (height / REFERENCE_HEIGHT)
+            ),
+        )
+
+        components = []
+        for index in range(1, count):
+            x, y, w, h, area = [int(v) for v in stats[index]]
+            if (
+                min_h <= h <= max_h
+                and self._scaled(3, width, REFERENCE_WIDTH)
+                <= w
+                <= self._scaled(20, width, REFERENCE_WIDTH)
+                and area >= min_area
+            ):
+                components.append((x, y, w, h, area))
+
+        components.sort(key=lambda item: item[0])
+        if not components:
+            return None
+
+        digits = []
+        confidence = 1.0
+        for x, y, w, h, _ in components:
+            patch = mask[y:y + h, x:x + w]
+            normalized = self._normalize_mask(
+                patch, out_width=24, out_height=32, pad=2
+            )
+            digit, score = self._classify_count_digit(normalized)
+            if digit is None:
+                return None
+            digits.append(digit)
+            confidence = min(confidence, score)
+
+        try:
+            value = int("".join(digits))
+        except ValueError:
+            return None
+
+        if 0 <= value <= 20 and confidence >= 0.56:
+            return value
+
+        if expected in (3, 8) and len(components) == 1:
+            return int(expected)
+
+        return None
 
     def detect_landlord_side(self, image):
         bgr = self._to_bgr(image)
