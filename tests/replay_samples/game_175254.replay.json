@@ -1,8 +1,0 @@
-{
-  "format": "wechat_replay_v1",
-  "video": "腾讯欢乐斗地主 2026-09-30 17-52-54.mp4",
-  "sample_seconds": 0.55,
-  "actions": [[20.22,"INIT",2,"DAKKKQQT998887543","A53",{"left":20,"right":17}],[28.96,"left","7",19,"count"],[32.24,"me","T",16],[34.42,"right","J",16,"count"],[36.61,"left","Q",18,"count"],[38.25,"me","A",15],[38.79,"right","PASS","visual"],[39.89,"left","PASS","visual"],[44.8,"me","8883",11],[46.99,"right","PASS","visual"],[48.08,"left","PASS","visual"],[54.64,"me","4",10],[57.37,"right","6",15,"count"],[58.46,"left","9",17,"count"],[61.74,"me","Q",9],[62.29,"right","PASS","visual"],[65.02,"left","2",16,"count"],[66.66,"me","PASS","visual"],[67.75,"right","PASS","visual"],[74.85,"left","66554433",8,"count"],[80.87,"me","5",8],[80.87,"right","PASS","inferred"],[80.87,"left","4",7,"count"],[83.6,"me","PASS","inferred"],[83.6,"right","7",14,"count"],[86.88,"left","A",6,"count"],[90.7,"me","PASS","visual"],[91.79,"right","2",13,"count"],[92.89,"left","PASS","visual"],[98.35,"me","PASS","inferred"],[98.35,"right","AKQJT98765",3,"count"],[102.72,"left","PASS","inferred"],[102.72,"me","PASS","inferred"],[102.72,"right","2",2,"count"],[105.45,"left","X",5,"count"],[110.92,"me","D",7],[111.46,"right","PASS","visual"],[112.56,"left","PASS","visual"],[131.13,"me","99",5],[132.23,"right","PASS","visual"],[134.96,"left","TT",3,"count"],[138.78,"me","KK",3],[140.97,"right","PASS","inferred"],[140.97,"left","PASS","inferred"],[140.97,"me","7",2],[143.15,"right","2",1,"count"],[143.15,"left","PASS","visual"],[147.52,"me","PASS","inferred"],[147.52,"right","3",0,"badgegone"]],
-  "issues": [],
-  "summary": {"position_code":2,"bottom_cards":"A53","tracked_remaining":{"left":3,"right":0},"my_remaining":2,"confirmed_my_hand":"KQ"}
-}
