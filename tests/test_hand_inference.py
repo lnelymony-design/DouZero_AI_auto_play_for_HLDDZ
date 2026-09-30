@@ -122,6 +122,41 @@ class HandInferenceEngineTests(unittest.TestCase):
         self.assertGreaterEqual(result["effective_sample_ratio"], 0.0)
         self.assertLessEqual(result["effective_sample_ratio"], 1.0)
 
+    def test_actual_single_play_reduces_posterior_for_split_pair(self):
+        common = dict(
+            my_position="landlord",
+            my_hand_cards="333444555666777888DX",
+            sample_count=1200,
+            random_seed=23,
+            behavior_temperature=0.75,
+        )
+
+        neutral = HandInferenceEngine(
+            **common,
+            play_behavior_strength=0.0,
+        )
+        neutral.observe("landlord_down", "K")
+        neutral_result = neutral.infer()
+        neutral_k = neutral_result["players"]["landlord_down"]["cards"]["K"]["one_plus"]
+
+        behavioral = HandInferenceEngine(
+            **common,
+            play_behavior_strength=1.0,
+        )
+        behavioral.observe("landlord_down", "K")
+        behavioral_result = behavioral.infer()
+        behavioral_k = behavioral_result["players"]["landlord_down"]["cards"]["K"]["one_plus"]
+
+        # The observed K is already public and removed from the current hand.
+        # If the sampled hidden hand still contains another K, that means the
+        # player split KK to lead a single K.  The behavior model should make
+        # those particles less likely, not more likely.
+        self.assertLess(behavioral_k, neutral_k)
+        self.assertGreaterEqual(
+            behavioral_result["effective_sample_ratio"],
+            behavioral.min_effective_sample_ratio - 0.01,
+        )
+
     def test_adaptive_tempering_respects_ess_floor(self):
         engine = HandInferenceEngine(
             my_position="landlord",
