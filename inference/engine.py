@@ -61,7 +61,11 @@ class HandInferenceEngine:
         self.three_landlord_cards = list(three_landlord_cards or "")
         self.sample_count = max(200, int(sample_count))
         self.pass_penalty = min(1.0, max(0.05, float(pass_penalty)))
-        self.rng = random.Random(random_seed)
+        # Common random numbers make adjacent public states comparable and keep
+        # the UI from flickering purely because a fresh Monte-Carlo stream was
+        # drawn.  A caller-provided seed still overrides the default.
+        self.random_seed = 20260930 if random_seed is None else random_seed
+        self.rng = random.Random(self.random_seed)
         self.history = []
         self._latest_weighted_samples = []
         self._latest_total_weight = 0.0
@@ -187,6 +191,10 @@ class HandInferenceEngine:
         return hands
 
     def infer(self):
+        # Rewind the Monte-Carlo stream for every public state.  The same state
+        # is therefore deterministic, while new observations change the legal
+        # pool/weights rather than introducing unrelated sampling noise.
+        self.rng.seed(self.random_seed)
         played = self._played_by_player()
         current_my_hand = self._current_my_hand(played)
         hidden_pool = self._current_hidden_pool(played, current_my_hand)
