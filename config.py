@@ -17,6 +17,13 @@ class Config:
     redouble_threshold: float
     super_redouble_threshold: float
     mingpai_threshold: float
+    inference_sample_count: int
+    inference_pass_penalty: float
+    inference_friendly_pass_penalty: float
+    inference_play_behavior_floor: float
+    inference_play_behavior_strength: float
+    inference_behavior_temperature: float
+    inference_min_effective_sample_ratio: float
     
     def __init__(self, **kwargs) -> None:
         self.window_width = kwargs.get('window_width', 1600)
@@ -34,6 +41,13 @@ class Config:
         self.redouble_threshold = kwargs.get('redouble_threshold', 0.7)
         self.super_redouble_threshold = kwargs.get('super_redouble_threshold', 0.8)
         self.mingpai_threshold = kwargs.get('mingpai_threshold', 1.2)
+        self.inference_sample_count = kwargs.get('inference_sample_count', 1600)
+        self.inference_pass_penalty = kwargs.get('inference_pass_penalty', 0.62)
+        self.inference_friendly_pass_penalty = kwargs.get('inference_friendly_pass_penalty', 0.86)
+        self.inference_play_behavior_floor = kwargs.get('inference_play_behavior_floor', 0.18)
+        self.inference_play_behavior_strength = kwargs.get('inference_play_behavior_strength', 1.0)
+        self.inference_behavior_temperature = kwargs.get('inference_behavior_temperature', 0.75)
+        self.inference_min_effective_sample_ratio = kwargs.get('inference_min_effective_sample_ratio', 0.28)
     
     @classmethod
     def load(cls):
