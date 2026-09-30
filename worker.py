@@ -182,6 +182,17 @@ class WorkerThread(QThread):
             "passes": set(),
         }
         pending = {}
+        played_latched = {
+            "left_played": False,
+            "right_played": False,
+            "my_played": False,
+        }
+
+        def display_cards(cards):
+            if not cards:
+                return "-"
+            display_map = {"D": "大王", "X": "小王", "T": "10"}
+            return " ".join(display_map.get(card, card) for card in cards)
 
         def stable_value(key, value, frames=2):
             previous, count = pending.get(key, (None, 0))
@@ -219,10 +230,10 @@ class WorkerThread(QThread):
 
             try:
                 my_hand_raw = recognizer.recognize_my_hand(screenshot)
-                my_hand = stable_value("my_hand", my_hand_raw)
+                my_hand = stable_value("my_hand", my_hand_raw, frames=3)
                 if my_hand is not None and my_hand != last_state["my_hand"]:
                     if my_hand:
-                        print(f"微信专用识牌 >>> 我的手牌({len(my_hand)}): {my_hand}")
+                        print(f"微信专用识牌 >>> 我的手牌({len(my_hand)}): {display_cards(my_hand)}")
                         last_state["my_hand"] = my_hand
 
                         if len(my_hand) in (17, 20):
@@ -242,7 +253,7 @@ class WorkerThread(QThread):
                     and len(three_cards) == 3
                     and three_cards != last_state["three_cards"]
                 ):
-                    print(f"微信专用识牌 >>> 三张底牌: {three_cards}")
+                    print(f"微信专用识牌 >>> 三张底牌: {display_cards(three_cards)}")
                     last_state["three_cards"] = three_cards
                     self.three_cards_signal.emit(three_cards)
 
@@ -276,9 +287,25 @@ class WorkerThread(QThread):
                     ("my_played", "我的出牌", recognizer.recognize_my_played(screenshot)),
                 ):
                     stable = stable_value(key, value)
-                    if stable and stable != last_state[key]:
-                        print(f"微信专用识牌 >>> {label}: {stable}")
-                        last_state[key] = stable
+                    if stable is None:
+                        continue
+
+                    # One visual play may disappear card-by-card during its fade-out
+                    # animation (for example 22 -> 2 -> empty). Once a play is
+                    # accepted, keep that side latched until the region is stably
+                    # empty before accepting another play from the same side.
+                    if stable == "":
+                        if played_latched[key]:
+                            played_latched[key] = False
+                            last_state[key] = None
+                        continue
+
+                    if played_latched[key]:
+                        continue
+
+                    print(f"微信专用识牌 >>> {label}: {display_cards(stable)}")
+                    last_state[key] = stable
+                    played_latched[key] = True
 
                 passes = recognizer.detect_pass_sides(screenshot)
                 stable_passes = stable_value("passes", frozenset(passes))
