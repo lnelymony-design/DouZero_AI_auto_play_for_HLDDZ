@@ -32,6 +32,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.workerThread = None
         self.observedRemainingCounts = {}
+        self.currentMyPosition = None
         self.bid_threshold = 0.6
         self.redouble_threshold = 0.65
         self.super_redouble_threshold = 0.7
@@ -155,8 +156,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_my_position_update(self, result):
         if len(result) == 0:
+            self.currentMyPosition = None
             self.myPositionLabel.setText('---')
+            self._refresh_inference_side_labels()
             return
+
+        self.currentMyPosition = result
         
         posotionTextMap = {
             'landlord_up': '农民（地主上家）',
@@ -165,6 +170,7 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
         self.myPositionLabel.setText(posotionTextMap[result])
+        self._refresh_inference_side_labels()
 
     def handle_ai_suggestion_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
@@ -300,30 +306,30 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def create_inference_table(self):
         title_layout = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("对手剩余手牌概率（推断）")
+        title = QtWidgets.QLabel("对手手牌推断")
         title.setFont(QtGui.QFont("微软雅黑", 9, QtGui.QFont.Bold))
         title_layout.addWidget(title)
         title_layout.addStretch()
 
-        self.inferenceMetaLabel = QtWidgets.QLabel("样本：-  有效：-  Pass证据：-")
+        self.inferenceMetaLabel = QtWidgets.QLabel("样本 - · Pass - · 状态等待")
         self.inferenceMetaLabel.setFont(QtGui.QFont("微软雅黑", 8))
         title_layout.addWidget(self.inferenceMetaLabel)
         self.main_layout.addLayout(title_layout)
 
         self.inferenceTable = QtWidgets.QTableWidget(self)
-        self.inferenceTable.setRowCount(4)
-        self.inferenceTable.setColumnCount(8)
+        self.inferenceTable.setRowCount(3)
+        self.inferenceTable.setColumnCount(9)
         self.inferenceTable.verticalHeader().setVisible(False)
         self.inferenceTable.horizontalHeader().setVisible(False)
         self.inferenceTable.setShowGrid(False)
-        self.inferenceTable.setFixedHeight(128)
+        self.inferenceTable.setFixedHeight(98)
         self.inferenceTable.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.inferenceTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.inferenceTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
         self.inferenceTable.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
 
-        headers = ["玩家", "剩余", "大王", "小王", "2", "A", "炸弹", "王炸"]
-        widths = [130, 65, 85, 85, 85, 85, 100, 100]
+        headers = ["对手", "剩余", "大王", "小王", "2", "A", "K", "炸弹", "王炸"]
+        widths = [145, 58, 67, 67, 55, 55, 55, 76, 76]
         for col, (header, width) in enumerate(zip(headers, widths)):
             self.inferenceTable.setColumnWidth(col, width)
             item = QtWidgets.QTableWidgetItem(header)
@@ -331,90 +337,113 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.inferenceTable.setItem(0, col, item)
 
-        position_names = [
-            ("landlord_up", "地主上家"),
-            ("landlord", "地主"),
-            ("landlord_down", "地主下家"),
-        ]
-        for row, (_, name) in enumerate(position_names, start=1):
+        for row, side in ((1, "左侧"), (2, "右侧")):
             self.inferenceTable.setRowHeight(row, 30)
-            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item = QtWidgets.QTableWidgetItem(side)
             name_item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
             name_item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.inferenceTable.setItem(row, 0, name_item)
-            for col in range(1, 8):
+            for col in range(1, 9):
                 item = QtWidgets.QTableWidgetItem("-")
                 item.setTextAlignment(QtCore.Qt.AlignCenter)
                 self.inferenceTable.setItem(row, col, item)
 
         self.main_layout.addWidget(self.inferenceTable)
 
+    def _side_position_map(self):
+        mapping = {
+            "landlord": {"left": "landlord_up", "right": "landlord_down"},
+            "landlord_up": {"left": "landlord_down", "right": "landlord"},
+            "landlord_down": {"left": "landlord", "right": "landlord_up"},
+        }
+        return mapping.get(self.currentMyPosition, {})
+
+    @staticmethod
+    def _position_display_name(position):
+        return {
+            "landlord": "地主",
+            "landlord_up": "农民",
+            "landlord_down": "农民",
+        }.get(position, "-")
+
+    def _refresh_inference_side_labels(self):
+        if not hasattr(self, "inferenceTable"):
+            return
+        side_map = self._side_position_map()
+        for row, side_key, side_text in (
+            (1, "left", "左侧"),
+            (2, "right", "右侧"),
+        ):
+            position = side_map.get(side_key)
+            role = self._position_display_name(position)
+            text = side_text if role == "-" else f"{side_text}（{role}）"
+            item = QtWidgets.QTableWidgetItem(text)
+            item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.inferenceTable.setItem(row, 0, item)
+
     def handle_remaining_count_update(self, result):
         if not isinstance(result, dict):
             return
-
         self.observedRemainingCounts.update(result)
-        position_rows = {
-            "landlord_up": 1,
-            "landlord": 2,
-            "landlord_down": 3,
-        }
+        self._render_remaining_counts()
 
-        for position, info in result.items():
-            row = position_rows.get(position)
-            if row is None or not isinstance(info, dict):
-                continue
-
-            count = info.get("count")
+    def _render_remaining_counts(self):
+        side_map = self._side_position_map()
+        for row, side_key in ((1, "left"), (2, "right")):
+            position = side_map.get(side_key)
+            info = self.observedRemainingCounts.get(position, {}) if position else {}
+            count = info.get("count") if isinstance(info, dict) else None
             if count is None:
                 continue
 
-            text = f"{count}实" if info.get("observed") else str(count)
+            value = f"{count}实" if info.get("observed") else str(count)
             if info.get("desync"):
-                text = f"{count}!"
+                value = f"{count}!"
 
-            item = QtWidgets.QTableWidgetItem(text)
+            item = QtWidgets.QTableWidgetItem(value)
             item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
             item.setTextAlignment(QtCore.Qt.AlignCenter)
             if info.get("desync"):
                 item.setForeground(QtGui.QColor("#ff0000"))
-                item.setToolTip("微信画面实测张数与动作历史推算不一致")
+                item.setToolTip("画面剩余张数与动作历史尚未完成匹配")
             elif info.get("observed"):
-                item.setForeground(QtGui.QColor("#0000FF"))
-                item.setToolTip("微信画面实测剩余张数")
+                item.setForeground(QtGui.QColor("#0066cc"))
+                item.setToolTip("微信画面确认的剩余张数")
             self.inferenceTable.setItem(row, 1, item)
 
     def handle_hand_inference_update(self, result):
-        position_rows = {
-            "landlord_up": 1,
-            "landlord": 2,
-            "landlord_down": 3,
-        }
-
         if not result or not result.get("players"):
-            self.inferenceMetaLabel.setText("样本：-  有效：-  Pass证据：-")
-            for row in range(1, 4):
-                for col in range(1, 8):
+            self.inferenceMetaLabel.setText("样本 - · Pass - · 状态等待")
+            for row in (1, 2):
+                for col in range(1, 9):
                     item = QtWidgets.QTableWidgetItem("-")
                     item.setTextAlignment(QtCore.Qt.AlignCenter)
                     self.inferenceTable.setItem(row, col, item)
             return
 
+        desync = any(
+            isinstance(info, dict) and info.get("desync")
+            for info in self.observedRemainingCounts.values()
+        )
+        status = "状态需校验" if desync else "状态正常"
         self.inferenceMetaLabel.setText(
-            f"样本：{result.get('samples', '-')}  "
-            f"有效：{result.get('effective_samples', '-')}  "
-            f"Pass证据：{result.get('pass_evidence_count', 0)}"
+            f"样本 {result.get('samples', '-')} · "
+            f"Pass {result.get('pass_evidence_count', 0)} · {status}"
         )
 
-        for row in range(1, 4):
-            for col in range(1, 8):
-                item = QtWidgets.QTableWidgetItem("-")
-                item.setTextAlignment(QtCore.Qt.AlignCenter)
-                self.inferenceTable.setItem(row, col, item)
+        self._refresh_inference_side_labels()
+        side_map = self._side_position_map()
+        players = result.get("players", {})
 
-        for position, data in result["players"].items():
-            row = position_rows.get(position)
-            if row is None:
+        for row, side_key in ((1, "left"), (2, "right")):
+            position = side_map.get(side_key)
+            data = players.get(position) if position else None
+            if not data:
+                for col in range(1, 9):
+                    item = QtWidgets.QTableWidgetItem("-")
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    self.inferenceTable.setItem(row, col, item)
                 continue
 
             observed_info = self.observedRemainingCounts.get(position, {})
@@ -434,6 +463,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._format_inference_probability(data, "X"),
                 self._format_inference_probability(data, "2"),
                 self._format_inference_probability(data, "A"),
+                self._format_inference_probability(data, "K"),
                 f"{data.get('any_bomb', 0):.0%}",
                 f"{data.get('rocket', 0):.0%}",
             ]
@@ -445,20 +475,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 if col == 1 and value.endswith("!"):
                     item.setForeground(QtGui.QColor("#ff0000"))
-                    item.setToolTip("微信画面实测张数与动作历史推算不一致")
                 elif col == 1 and value.endswith("实"):
-                    item.setForeground(QtGui.QColor("#0000FF"))
-                    item.setToolTip("微信画面实测剩余张数")
+                    item.setForeground(QtGui.QColor("#0066cc"))
                 elif col >= 2 and value.endswith("%"):
                     try:
                         p = float(value[:-1]) / 100.0
                         if p >= 0.75:
-                            item.setForeground(QtGui.QColor("#ff0000"))
-                        elif p >= 0.5:
-                            item.setForeground(QtGui.QColor("#0000FF"))
+                            item.setForeground(QtGui.QColor("#d00000"))
+                        elif p >= 0.50:
+                            item.setForeground(QtGui.QColor("#c26b00"))
+                        elif p <= 0.10:
+                            item.setForeground(QtGui.QColor("#808080"))
                     except ValueError:
                         pass
                 self.inferenceTable.setItem(row, col, item)
+
+        self._render_remaining_counts()
 
     @staticmethod
     def _format_inference_probability(player_data, card):
