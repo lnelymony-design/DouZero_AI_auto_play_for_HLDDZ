@@ -278,11 +278,12 @@ class HandInferenceEngine:
     @staticmethod
     def compact_summary(result, important_cards=("D", "X", "2", "A", "K")):
         parts = []
+        display_map = {"D": "大王", "X": "小王", "T": "10"}
         for player, data in result.get("players", {}).items():
             card_parts = []
             for card in important_cards:
                 prob = data["cards"][card]["one_plus"]
-                card_parts.append(f"{card}:{prob:.0%}")
+                card_parts.append(f"{display_map.get(card, card)}:{prob:.0%}")
             parts.append(
                 f"{player}({data['remaining_count']}): "
                 + " ".join(card_parts)
