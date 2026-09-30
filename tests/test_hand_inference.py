@@ -47,6 +47,24 @@ class HandInferenceEngineTests(unittest.TestCase):
         self.assertEqual(result["players"]["landlord_down"]["remaining_count"], 15)
         self.assertEqual(result["players"]["landlord_up"]["remaining_count"], 16)
 
+    def test_response_risk_is_bounded_and_rocket_cannot_be_beaten(self):
+        engine = HandInferenceEngine(
+            my_position="landlord_down",
+            my_hand_cards="DAAKKKQQJJT544333",
+            three_landlord_cards="A77",
+            sample_count=220,
+            random_seed=11,
+        )
+        engine.infer()
+
+        single_risk = engine.response_risk("3", max_samples=100)
+        self.assertIsNotNone(single_risk)
+        self.assertGreaterEqual(single_risk, 0.0)
+        self.assertLessEqual(single_risk, 1.0)
+
+        self.assertEqual(engine.response_risk("DX", max_samples=100), 0.0)
+        self.assertIsNone(engine.response_risk("Pass", max_samples=100))
+
 
 if __name__ == "__main__":
     unittest.main()
