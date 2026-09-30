@@ -246,6 +246,15 @@ class HandInferenceEngineTests(unittest.TestCase):
             (1 / 3) + 0.35 * (1 / 3),
             places=6,
         )
+        self.assertIn("players", profile)
+        up = profile["players"]["landlord_up"]
+        down = profile["players"]["landlord_down"]
+        self.assertAlmostEqual(up["ordinary_beat"], 1 / 3, places=6)
+        self.assertAlmostEqual(up["bomb_only"], 1 / 3, places=6)
+        self.assertAlmostEqual(up["unbeatable"], 1 / 3, places=6)
+        self.assertAlmostEqual(down["ordinary_beat"], 0.0, places=6)
+        self.assertAlmostEqual(down["bomb_only"], 0.0, places=6)
+        self.assertAlmostEqual(down["unbeatable"], 1.0, places=6)
 
 
 if __name__ == "__main__":
