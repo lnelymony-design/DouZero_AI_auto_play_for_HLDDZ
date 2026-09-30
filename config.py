@@ -27,6 +27,10 @@ class Config:
     risk_adjustment_enabled: bool
     risk_adjustment_weight: float
     risk_adjustment_min_ess_ratio: float
+    risk_adjustment_min_risk_gain: float
+    risk_adjustment_max_model_gap_fraction: float
+    risk_adjustment_max_model_rank: int
+    risk_adjustment_response_samples: int
     
     def __init__(self, **kwargs) -> None:
         self.window_width = kwargs.get('window_width', 1600)
@@ -53,7 +57,11 @@ class Config:
         self.inference_min_effective_sample_ratio = kwargs.get('inference_min_effective_sample_ratio', 0.28)
         self.risk_adjustment_enabled = kwargs.get('risk_adjustment_enabled', False)
         self.risk_adjustment_weight = kwargs.get('risk_adjustment_weight', 0.45)
-        self.risk_adjustment_min_ess_ratio = kwargs.get('risk_adjustment_min_ess_ratio', 0.40)
+        self.risk_adjustment_min_ess_ratio = kwargs.get('risk_adjustment_min_ess_ratio', 0.45)
+        self.risk_adjustment_min_risk_gain = kwargs.get('risk_adjustment_min_risk_gain', 0.25)
+        self.risk_adjustment_max_model_gap_fraction = kwargs.get('risk_adjustment_max_model_gap_fraction', 0.25)
+        self.risk_adjustment_max_model_rank = kwargs.get('risk_adjustment_max_model_rank', 3)
+        self.risk_adjustment_response_samples = kwargs.get('risk_adjustment_response_samples', 240)
     
     @classmethod
     def load(cls):
