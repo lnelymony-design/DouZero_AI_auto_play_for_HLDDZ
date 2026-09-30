@@ -862,14 +862,23 @@ class WorkerThread(QThread):
                 if (
                     not self_removed
                     and confirmed_my_hand
-                    and self_hand_missing_frames >= 4
+                    and expected_side == "me"
                 ):
-                    final_cards = recognizer.recognize_my_played(
+                    # Final local plays are easier to prove from the table than
+                    # from the hand area: after the last card(s) leave, the UI
+                    # can immediately enter settlement animation and briefly
+                    # hallucinate hand glyphs.  If the table stably shows every
+                    # remaining card as one legal move, that is sufficient hard
+                    # evidence that the local player went out.
+                    raw_final_cards = recognizer.recognize_my_played(
                         screenshot, expected_count=len(confirmed_my_hand)
+                    )
+                    final_cards = stable_value(
+                        "my_final_play", raw_final_cards, frames=2
                     )
                     if (
                         final_cards
-                        and len(final_cards) == len(confirmed_my_hand)
+                        and Counter(final_cards) == Counter(confirmed_my_hand)
                         and is_legal_play(final_cards)
                     ):
                         self_removed = final_cards
