@@ -17,10 +17,12 @@ _COUNT_DIGIT_TEMPLATE_B64 = {
     "0": "eJyt0cEKACAIA9D9/08vIijMWZLtlM9LKvAYjmSdM1ptJ3BqX5VtlN/0js2RdjXLTz//8zZXfSe9lIdx9wodWk0Lf9MA1u4p5Q==",
     "1": "eJxjYCAT/AcDosX/wwB2USLFcZmDJDcqPiLFsQgTBQBDIqBg",
     "2": "eJytkdEKACAIA/3/n14QQZRzreie5BoLNOIRdEyPSaGXF+6xk36s/Jgd/2E+7ohsQpTo8uRluRvXYdOzy66e3cvw0PkrGvGvHPI=",
+    "3": "eJytkcEKACAIQ/3/n16HiHA502gnfQ5kavYoTNU4tgR2kxqH51Stjh0Zp02fMsdmzeXtxNpGgBJ3Fubocpye/I9RXoEvN6hoAJBMEP4=",
     "4": "eJytz0EKACAIRFHvf+kpiCwaA2X8u3nSIjMhzAoORAd4kqPHF8TOP9g76b5yfkbB72L1F1Wng719uNVZlQYz3hn1",
     "5": "eJylksEOACAIQvn/n6ZLtbQoNW6+NgYmUBSnApxGijPJvc85pAqvO126MstDdUeeMHeO6uGfr/7bR+DJ+2Dzuy0QRQ59hHE1NyEc8g==",
     "6": "eJylkEsSADAEQ93/0um0qxZRn+y8GILIRAAKHEcEp7mP4yG1LCyJsf78saA14vZs2xRxb2jEU3sdviv1CnIX5fSjlyE9LRShJ+c=",
     "7": "eJxjYCAD/EcF+MX/YwHkiGOTweEyXC4mWpwSYxDytLUUbxBgmoJDnMSAxK+cWMeQZQo2PzHgEicaAAC8KPIO",
+    "8": "eJxjYCAP/IcAYsX/IwB2URQZHOL/8YqjM6knjuBhdScucQL+ojgc0EL7PyaHCHFUu3AEyX9yzMflTsx4JCSOM3yQpRjIAwCgUW2h",
     "9": "eJzNkDEOADAIAv3/p+ngYgQTdOqNhwnEiCNIPI/KoEugPTqisQZ89IPnnds/UDB92vF9GHltfX/ptLekF9rmActZIO4="
 }
 
@@ -377,21 +379,33 @@ class WechatCardRecognizer:
         cleaned.sort(key=lambda item: item[0])
         return "".join(item[1] for item in cleaned)
 
-    def recognize_my_hand(self, image):
+    def recognize_my_hand(self, image, is_landlord=False):
         bgr = self._to_bgr(image)
         if bgr is None:
             return ""
 
+        # In the WeChat miniapp a 17-card farmer hand is centered, while the
+        # landlord's 20-card hand expands almost edge-to-edge.  The three
+        # supplied full-game recordings include both layouts; using the farmer
+        # crop for a landlord hand cuts off the first/last cards and explains
+        # the earlier 18/16/7-card false reads.
+        if is_landlord:
+            rank_region = (0.005, 0.995, 0.655, 0.745)
+            joker_region = (0.005, 0.995, 0.655, 0.86)
+        else:
+            rank_region = (0.08, 0.93, 0.655, 0.745)
+            joker_region = (0.08, 0.93, 0.655, 0.86)
+
         normal = self._recognize_rank_band(
             bgr,
-            region=(0.08, 0.93, 0.655, 0.745),
+            region=rank_region,
             min_h_ref=40,
             max_h_ref=58,
             min_area_ref=240,
             score_threshold=0.62,
         )
         jokers = self._detect_jokers(
-            bgr, region=(0.08, 0.93, 0.655, 0.86)
+            bgr, region=joker_region
         )
         return self._merge_cards(normal, jokers)
 
