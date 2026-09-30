@@ -1321,6 +1321,8 @@ class WorkerThread(QThread):
                             self.ai_suggestion_signal.emit([])
                             round_initialized = False
                             expected_side = None
+                            reset_round_detection_state("我方手牌归零，本局结束")
+                            round_boundary_seen = True
                             break
                     else:
                         cards, new_count, evidence = payload
@@ -1353,6 +1355,10 @@ class WorkerThread(QThread):
                             self.ai_suggestion_signal.emit([])
                             round_initialized = False
                             expected_side = None
+                            reset_round_detection_state(
+                                f"{label}剩余0张，本局结束"
+                            )
+                            round_boundary_seen = True
                             break
 
                 # Count OCR also validates state even when no new play is ready.
