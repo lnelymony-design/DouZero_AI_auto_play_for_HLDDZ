@@ -501,6 +501,16 @@ class HandInferenceEngine:
                 },
                 "any_bomb": round(any_bomb, 4),
                 "rocket": round(rocket, 4),
+                "combo_risks": {
+                    "has_2": round(rank_stats["2"]["one_plus"], 4),
+                    "pair_2": round(rank_stats["2"]["pair_plus"], 4),
+                    "triple_2": round(rank_stats["2"]["triple_plus"], 4),
+                    "pair_A": round(rank_stats["A"]["pair_plus"], 4),
+                    "triple_A": round(rank_stats["A"]["triple_plus"], 4),
+                    "pair_K": round(rank_stats["K"]["pair_plus"], 4),
+                    "any_bomb": round(any_bomb, 4),
+                    "rocket": round(rocket, 4),
+                },
                 "top_sampled_hands": [
                     {"hand": hand, "probability": round(prob, 4)}
                     for hand, prob in top_hands
