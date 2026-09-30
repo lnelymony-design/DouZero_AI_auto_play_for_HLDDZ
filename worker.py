@@ -884,6 +884,23 @@ class WorkerThread(QThread):
                     for player, cards in douzero_history
                 ],
                 "suggestion_audit": list(suggestion_audit),
+                "posterior_control": {
+                    "residual_behavior_strength": (
+                        self.config.inference_residual_behavior_strength
+                    ),
+                    "residual_behavior_temperature": (
+                        self.config.inference_residual_behavior_temperature
+                    ),
+                    "rollout_enabled": bool(self.config.rollout_enabled),
+                    "rollout_shadow_mode": bool(
+                        self.config.rollout_shadow_mode
+                    ),
+                    "rollout_max_worlds": self.config.rollout_max_worlds,
+                    "rollout_min_worlds": self.config.rollout_min_worlds,
+                    "rollout_time_budget_seconds": (
+                        self.config.rollout_time_budget_seconds
+                    ),
+                },
             }
 
         def flush_round_audit_if_due(screenshot):
@@ -914,7 +931,7 @@ class WorkerThread(QThread):
                 payload = dict(pending_round_audit)
                 payload.pop("capture_times", None)
                 payload.pop("audit_stamp", None)
-                payload["format"] = "wechat_inference_audit_v3"
+                payload["format"] = "wechat_posterior_control_audit_v4"
 
                 with open(json_path, "w", encoding="utf-8") as fp:
                     json.dump(payload, fp, ensure_ascii=False, indent=2)
