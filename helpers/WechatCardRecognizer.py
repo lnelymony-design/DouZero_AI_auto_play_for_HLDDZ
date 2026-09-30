@@ -423,19 +423,42 @@ class WechatCardRecognizer:
         )
         return self._merge_cards(normal, jokers)
 
-    def recognize_left_played(self, image):
+    def recognize_left_played(self, image, expected_count=None):
         # Long combinations can extend toward the centre and lower than singles.
-        return self._recognize_played_region(image, (0.08, 0.50, 0.25, 0.55))
+        return self._recognize_played_with_expected_count(
+            image, (0.08, 0.50, 0.25, 0.55), expected_count
+        )
 
-    def recognize_right_played(self, image):
+    def recognize_right_played(self, image, expected_count=None):
         # The recordings include a 10-card right-side play (AKQJ1098765);
         # the old narrow crop missed it completely.
-        return self._recognize_played_region(image, (0.50, 0.92, 0.25, 0.58))
+        return self._recognize_played_with_expected_count(
+            image, (0.50, 0.92, 0.25, 0.58), expected_count
+        )
 
-    def recognize_my_played(self, image):
-        return self._recognize_played_region(image, (0.32, 0.68, 0.38, 0.62))
+    def recognize_my_played(self, image, expected_count=None):
+        return self._recognize_played_with_expected_count(
+            image, (0.32, 0.68, 0.38, 0.62), expected_count
+        )
 
-    def _recognize_played_region(self, image, region):
+    def _recognize_played_with_expected_count(
+        self, image, region, expected_count=None
+    ):
+        if expected_count is None:
+            return self._recognize_played_region(image, region)
+
+        # Remaining-card drops tell us exactly how many cards were played.
+        # Re-scan at several thresholds and accept a candidate only when the
+        # visible card count agrees with that hard observation.
+        for threshold in (0.68, 0.64, 0.60, 0.56):
+            cards = self._recognize_played_region(
+                image, region, score_threshold=threshold
+            )
+            if len(cards) == expected_count:
+                return cards
+        return ""
+
+    def _recognize_played_region(self, image, region, score_threshold=0.64):
         bgr = self._to_bgr(image)
         if bgr is None:
             return ""
@@ -446,7 +469,7 @@ class WechatCardRecognizer:
             min_h_ref=28,
             max_h_ref=50,
             min_area_ref=110,
-            score_threshold=0.64,
+            score_threshold=score_threshold,
         )
         # Played Jokers use the same vertical word treatment but may be smaller.
         joker_region = (
