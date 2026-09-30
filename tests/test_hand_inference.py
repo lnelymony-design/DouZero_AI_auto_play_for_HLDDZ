@@ -78,6 +78,50 @@ class HandInferenceEngineTests(unittest.TestCase):
         self.assertEqual(first["players"], second["players"])
         self.assertEqual(first["effective_samples"], second["effective_samples"])
 
+    def test_play_behavior_penalizes_splitting_a_pair(self):
+        engine = HandInferenceEngine(
+            my_position="landlord",
+            my_hand_cards="333444555666777888DX",
+            sample_count=220,
+            random_seed=3,
+        )
+        clean = engine._play_behavior_factor(
+            reconstructed_hand=list("K3456789TJQA2"),
+            action="K",
+            rival_action="Q",
+        )
+        split_pair = engine._play_behavior_factor(
+            reconstructed_hand=list("KK3456789TJQA2"),
+            action="K",
+            rival_action="Q",
+        )
+        self.assertLess(split_pair, clean)
+
+    def test_farmer_teammate_pass_is_weaker_evidence_than_enemy_pass(self):
+        engine = HandInferenceEngine(
+            my_position="landlord",
+            my_hand_cards="333444555666777888DX",
+            sample_count=220,
+            random_seed=4,
+        )
+        friendly = engine._pass_penalty_for("landlord_up", "landlord_down")
+        enemy = engine._pass_penalty_for("landlord_up", "landlord")
+        self.assertGreater(friendly, enemy)
+
+    def test_actual_play_evidence_is_reported(self):
+        engine = HandInferenceEngine(
+            my_position="landlord",
+            my_hand_cards="333444555666777888DX",
+            sample_count=240,
+            random_seed=5,
+        )
+        engine.observe("landlord_down", "A")
+        result = engine.infer()
+        self.assertEqual(result["play_evidence_count"], 1)
+        self.assertIn("effective_sample_ratio", result)
+        self.assertGreaterEqual(result["effective_sample_ratio"], 0.0)
+        self.assertLessEqual(result["effective_sample_ratio"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
