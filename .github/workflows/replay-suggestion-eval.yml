@@ -26,7 +26,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install "numpy==1.23.5" "torch==2.0.1"
       - name: Compare lambda values
+        env:
+          PYTHONPATH: .
         run: |
+          set -o pipefail
           python tools/evaluate_replay_suggestions.py \
             tools/replay_fixtures/game_01.replay.json \
             tools/replay_fixtures/game_02.replay.json \
