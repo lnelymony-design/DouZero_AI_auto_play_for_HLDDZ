@@ -129,6 +129,7 @@ def evaluate_one(
         my_hand_cards=replay["my_hand"],
         three_landlord_cards=replay["bottom_cards"],
         sample_count=sample_count,
+        random_seed=20260930,
     )
 
     stats = {
