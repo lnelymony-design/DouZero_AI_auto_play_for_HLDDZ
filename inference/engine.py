@@ -56,6 +56,8 @@ class HandInferenceEngine:
         friendly_pass_penalty=0.86,
         play_behavior_floor=0.18,
         play_behavior_strength=1.0,
+        behavior_temperature=0.75,
+        min_effective_sample_ratio=0.28,
         random_seed=None,
     ):
         if my_position not in POSITIONS:
@@ -73,6 +75,12 @@ class HandInferenceEngine:
         )
         self.play_behavior_strength = min(
             3.0, max(0.0, float(play_behavior_strength))
+        )
+        self.behavior_temperature = min(
+            1.0, max(0.0, float(behavior_temperature))
+        )
+        self.min_effective_sample_ratio = min(
+            0.8, max(0.05, float(min_effective_sample_ratio))
         )
         # Common random numbers make adjacent public states comparable and keep
         # the UI from flickering purely because a fresh Monte-Carlo stream was
@@ -324,6 +332,62 @@ class HandInferenceEngine:
 
         return hands
 
+    @staticmethod
+    def _tempered_weights(log_weights, exponent):
+        if not log_weights:
+            return []
+        exponent = max(0.0, float(exponent))
+        max_log = max(log_weights)
+        return [
+            math.exp((value - max_log) * exponent)
+            for value in log_weights
+        ]
+
+    @staticmethod
+    def _effective_sample_ratio_from_weights(weights):
+        if not weights:
+            return 0.0
+        total = sum(weights)
+        if total <= 0:
+            return 0.0
+        normalized_sq = sum((w / total) ** 2 for w in weights)
+        if normalized_sq <= 0:
+            return 0.0
+        ess = 1.0 / normalized_sq
+        return ess / len(weights)
+
+    def _choose_behavior_temperature(self, log_weights):
+        """Use the strongest behavior weighting that preserves a minimum ESS.
+
+        The action model is heuristic rather than a calibrated human policy.
+        Adaptive tempering prevents many correlated actions from collapsing the
+        posterior onto a handful of particles and producing false certainty.
+        """
+        base = self.behavior_temperature
+        if not log_weights or base <= 0:
+            return 0.0
+
+        base_weights = self._tempered_weights(log_weights, base)
+        if (
+            self._effective_sample_ratio_from_weights(base_weights)
+            >= self.min_effective_sample_ratio
+        ):
+            return base
+
+        # exponent=0 gives uniform weights (ESS ratio=1).  Binary-search the
+        # largest exponent that still satisfies the requested ESS floor.
+        low = 0.0
+        high = base
+        for _ in range(14):
+            mid = (low + high) / 2.0
+            weights = self._tempered_weights(log_weights, mid)
+            ratio = self._effective_sample_ratio_from_weights(weights)
+            if ratio >= self.min_effective_sample_ratio:
+                low = mid
+            else:
+                high = mid
+        return low
+
     def infer(self):
         # Rewind the Monte-Carlo stream for every public state.  The same state
         # is therefore deterministic, while new observations change the legal
@@ -336,19 +400,21 @@ class HandInferenceEngine:
         forced_landlord = self._forced_landlord_cards(played)
         pass_contexts, play_contexts = self._build_behavior_contexts()
 
-        weighted_samples = []
+        sampled_hands = []
+        log_weights = []
         for _ in range(self.sample_count):
             hands = self._sample_current_hands(hidden_pool, remaining_counts, forced_landlord)
             if hands is None:
                 continue
 
-            weight = 1.0
+            log_weight = 0.0
             for player, rival_player, rival_action, future_cards in pass_contexts:
                 reconstructed = list(hands[player]) + list(future_cards)
                 hand_env = [RealCard2EnvCard[c] for c in reconstructed]
                 rival_env = [RealCard2EnvCard[c] for c in rival_action]
                 if can_beat(hand_env, rival_env):
-                    weight *= self._pass_penalty_for(player, rival_player)
+                    factor = self._pass_penalty_for(player, rival_player)
+                    log_weight += math.log(max(1e-12, factor))
 
             for (
                 player,
@@ -362,14 +428,19 @@ class HandInferenceEngine:
                     + list(action)
                     + list(future_cards)
                 )
-                weight *= self._play_behavior_factor(
+                factor = self._play_behavior_factor(
                     reconstructed,
                     action,
                     rival_action,
                 )
+                log_weight += math.log(max(1e-12, factor))
 
-            if weight > 0:
-                weighted_samples.append((hands, weight))
+            sampled_hands.append(hands)
+            log_weights.append(log_weight)
+
+        temperature_used = self._choose_behavior_temperature(log_weights)
+        weights = self._tempered_weights(log_weights, temperature_used)
+        weighted_samples = list(zip(sampled_hands, weights))
 
         total_weight = sum(w for _, w in weighted_samples)
         if total_weight <= 0:
@@ -456,10 +527,13 @@ class HandInferenceEngine:
             "friendly_pass_penalty": self.friendly_pass_penalty,
             "play_behavior_floor": self.play_behavior_floor,
             "play_behavior_strength": self.play_behavior_strength,
+            "behavior_temperature_configured": self.behavior_temperature,
+            "behavior_temperature_used": round(temperature_used, 4),
+            "min_effective_sample_ratio": self.min_effective_sample_ratio,
             "effective_sample_ratio": round(
                 effective_samples / len(weighted_samples), 3
             ) if weighted_samples else 0.0,
-            "behavior_model": "heuristic_v2",
+            "behavior_model": "heuristic_v2_tempered",
         }
 
     def response_risk(self, action, max_samples=320):
