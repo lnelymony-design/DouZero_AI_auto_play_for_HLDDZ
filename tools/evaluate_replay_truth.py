@@ -85,12 +85,19 @@ def evaluate(
             _, actions = env.step(mine, action=None, update=False)
             triplets = []
             truth_map = {}
+            profile_map = {}
             for action, score in actions[:max_candidates]:
-                risk = None if action == "Pass" else inf.response_risk(action)
+                profile = (
+                    None
+                    if action == "Pass"
+                    else inf.response_profile(action)
+                )
+                risk = None if profile is None else profile["can_beat"]
                 truth_value = actual_response(
                     events, idx, code, truth["final_hands"], action
                 )
                 triplets.append((action, score, risk))
+                profile_map[action] = profile
                 truth_map[action] = truth_value
                 if risk is not None:
                     candidates.append((float(risk), bool(truth_value)))
@@ -106,6 +113,21 @@ def evaluate(
                         "action": action,
                         "score": float(score),
                         "risk": risk,
+                        "pressure": (
+                            None
+                            if profile_map.get(action) is None
+                            else profile_map[action]["pressure"]
+                        ),
+                        "ordinary_beat": (
+                            None
+                            if profile_map.get(action) is None
+                            else profile_map[action]["ordinary_beat"]
+                        ),
+                        "bomb_only": (
+                            None
+                            if profile_map.get(action) is None
+                            else profile_map[action]["bomb_only"]
+                        ),
                         "truth": truth_map.get(action),
                         "rank": rank,
                     }
@@ -322,6 +344,71 @@ def main():
             )
     else:
         print("no comparable non-pass top decisions")
+
+    print("\n=== RESPONSE PRESSURE SEPARATION ===")
+    pressure_gains = []
+    pressure_rows = []
+    for decision_index, row in enumerate(all_decisions):
+        items = row.get("triplets", [])
+        if not items or items[0].get("pressure") is None:
+            continue
+        raw_item = items[0]
+        numeric = [
+            x for x in items[1:]
+            if x.get("pressure") is not None
+        ]
+        if not numeric:
+            continue
+        best = min(numeric, key=lambda x: x["pressure"])
+        gain = raw_item["pressure"] - best["pressure"]
+        pressure_gains.append(gain)
+
+        scores = [x["score"] for x in items]
+        span = max(scores) - min(scores) if scores else 0.0
+        model_gap = raw_item["score"] - best["score"]
+        gap_fraction = (
+            0.0 if span <= 1e-12 else model_gap / span
+        )
+        pressure_rows.append({
+            "decision": decision_index,
+            "raw": raw_item,
+            "alt": best,
+            "gain": gain,
+            "gap_fraction": gap_fraction,
+        })
+
+    if pressure_gains:
+        print(
+            f"pressure gain mean={mean(pressure_gains):.1%} "
+            f"max={max(pressure_gains):.1%}"
+        )
+        for threshold in (0.01, 0.03, 0.05, 0.10, 0.15):
+            count = sum(g >= threshold for g in pressure_gains)
+            print(
+                f"pressure gain >= {threshold:.0%}: "
+                f"{count}/{len(pressure_gains)}"
+            )
+        print("largest pressure separations:")
+        for item in sorted(
+            pressure_rows, key=lambda x: x["gain"], reverse=True
+        )[:10]:
+            raw_item = item["raw"]
+            alt_item = item["alt"]
+            print(
+                f"  D{item['decision']}: "
+                f"raw {raw_item['action']} "
+                f"pressure={raw_item['pressure']:.1%} "
+                f"(ordinary={raw_item['ordinary_beat']:.1%}, "
+                f"bomb={raw_item['bomb_only']:.1%}) "
+                f"truth={raw_item['truth']} -> "
+                f"M{alt_item['rank']} {alt_item['action']} "
+                f"pressure={alt_item['pressure']:.1%} "
+                f"(ordinary={alt_item['ordinary_beat']:.1%}, "
+                f"bomb={alt_item['bomb_only']:.1%}) "
+                f"truth={alt_item['truth']}; "
+                f"gain={item['gain']:.1%}, "
+                f"gap={item['gap_fraction']:.1%}"
+            )
 
     print("\n=== SAFER ALTERNATIVE TRUTH GRID ===")
     print(
