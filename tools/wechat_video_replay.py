@@ -128,6 +128,8 @@ def replay(path: str, sample_seconds=0.35):
         "left": {"cards": "", "time": -999.0},
         "right": {"cards": "", "time": -999.0},
     }
+    count_missing_frames = {"left": 0, "right": 0}
+    self_hand_missing_frames = 0
     unresolved_since = {"left": None, "right": None}
     last_passes = set()
 
@@ -182,6 +184,16 @@ def replay(path: str, sample_seconds=0.35):
             side: recognizer.recognize_remaining_count(frame, side, expected=None)
             for side in ("left", "right")
         }
+        for side in ("left", "right"):
+            if raw_counts[side] is None:
+                count_missing_frames[side] += 1
+            else:
+                count_missing_frames[side] = 0
+
+        if initialized and not raw_hand:
+            self_hand_missing_frames += 1
+        else:
+            self_hand_missing_frames = 0
         counts = {
             side: stable.get(f"count_{side}", raw_counts[side], 4)
             for side in ("left", "right")
@@ -263,42 +275,81 @@ def replay(path: str, sample_seconds=0.35):
                 recent_play[side] = {"cards": cards, "time": t}
 
         # Local player: hand delta is authoritative.
+        local_action = None
+        local_final_out = False
         if live_hand and confirmed_my_hand and live_hand != confirmed_my_hand:
             removed = hand_difference(confirmed_my_hand, live_hand)
             if removed:
-                if sync_to_actor(t, "me", counts, raw_hand):
-                    add_action(t, "me", removed, "hand_delta", len(live_hand))
-                    confirmed_my_hand = live_hand
-                    expected_side = "right"
+                local_action = removed
             elif removed == "":
                 confirmed_my_hand = live_hand
+
+        if (
+            not local_action
+            and confirmed_my_hand
+            and self_hand_missing_frames >= 4
+        ):
+            final_cards = recognizer.recognize_my_played(
+                frame, expected_count=len(confirmed_my_hand)
+            )
+            if final_cards and len(final_cards) == len(confirmed_my_hand):
+                local_action = final_cards
+                local_final_out = True
+
+        if local_action and sync_to_actor(t, "me", counts, raw_hand):
+            remaining = 0 if local_final_out else len(live_hand)
+            add_action(t, "me", local_action, "hand_delta", remaining)
+            confirmed_my_hand = "" if local_final_out else live_hand
+            expected_side = None if local_final_out else "right"
 
         # Opponents: count drop + visible play length must agree.
         for side in ("left", "right"):
             new_count = counts[side]
             old_count = tracked[side]
-            if new_count is None or old_count is None:
+            if old_count is None:
                 continue
-            if new_count > old_count:
+            if new_count is not None and new_count > old_count:
                 result.issues.append(
                     f"{t:.1f}s {side} count increased {old_count}->{new_count}"
                 )
                 continue
-            if new_count == old_count:
+            if new_count is not None and new_count == old_count:
                 unresolved_since[side] = None
                 continue
 
-            drop = old_count - new_count
+            source = None
+            if new_count is not None and new_count < old_count:
+                drop = old_count - new_count
+                target_count = new_count
+                source = "count+play"
+            elif (
+                new_count is None
+                and count_missing_frames[side] >= 4
+                and old_count > 0
+            ):
+                drop = old_count
+                target_count = 0
+                source = "badge_gone+all_out"
+            else:
+                continue
+
             info = recent_play[side]
-            cards = info["cards"]
-            if cards and t - info["time"] <= 3.0 and len(cards) == drop:
+            cards = info["cards"] if t - info["time"] <= 3.0 else ""
+            if not cards or len(cards) != drop:
+                cards = (
+                    recognizer.recognize_left_played(frame, expected_count=drop)
+                    if side == "left"
+                    else recognizer.recognize_right_played(frame, expected_count=drop)
+                )
+
+            if cards and len(cards) == drop:
                 if sync_to_actor(t, side, counts, raw_hand):
-                    add_action(t, side, cards, "count+play", new_count)
-                    tracked[side] = new_count
-                    result.count_trace[side].append(new_count)
+                    add_action(t, side, cards, source, target_count)
+                    tracked[side] = target_count
+                    result.count_trace[side].append(target_count)
                     recent_play[side] = {"cards": "", "time": -999.0}
                     unresolved_since[side] = None
-                    expected_side = SIDE_CYCLE[side]
+                    expected_side = None if target_count == 0 else SIDE_CYCLE[side]
             else:
                 if unresolved_since[side] is None:
                     unresolved_since[side] = t
@@ -307,7 +358,7 @@ def replay(path: str, sample_seconds=0.35):
                         "time": round(t, 2),
                         "side": side,
                         "old": old_count,
-                        "new": new_count,
+                        "new": target_count,
                         "drop": drop,
                         "visible": cards,
                     }
