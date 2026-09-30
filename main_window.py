@@ -31,6 +31,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_actions()
 
         self.workerThread = None
+        self.observedRemainingCounts = {}
         self.bid_threshold = 0.6
         self.redouble_threshold = 0.65
         self.super_redouble_threshold = 0.7
@@ -86,6 +87,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.workerThread.game_win_rate_signal.connect(self.handle_game_win_rate_update)
             self.workerThread.played_card_signal.connect(self.handle_played_card_update)
             self.workerThread.hand_inference_signal.connect(self.handle_hand_inference_update)
+            self.workerThread.remaining_count_signal.connect(self.handle_remaining_count_update)
 
         if not self.workerThread.isRunning():
             self.workerThread.start()
@@ -347,6 +349,41 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.main_layout.addWidget(self.inferenceTable)
 
+    def handle_remaining_count_update(self, result):
+        if not isinstance(result, dict):
+            return
+
+        self.observedRemainingCounts.update(result)
+        position_rows = {
+            "landlord_up": 1,
+            "landlord": 2,
+            "landlord_down": 3,
+        }
+
+        for position, info in result.items():
+            row = position_rows.get(position)
+            if row is None or not isinstance(info, dict):
+                continue
+
+            count = info.get("count")
+            if count is None:
+                continue
+
+            text = f"{count}实" if info.get("observed") else str(count)
+            if info.get("desync"):
+                text = f"{count}!"
+
+            item = QtWidgets.QTableWidgetItem(text)
+            item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            if info.get("desync"):
+                item.setForeground(QtGui.QColor("#ff0000"))
+                item.setToolTip("微信画面实测张数与动作历史推算不一致")
+            elif info.get("observed"):
+                item.setForeground(QtGui.QColor("#0000FF"))
+                item.setToolTip("微信画面实测剩余张数")
+            self.inferenceTable.setItem(row, 1, item)
+
     def handle_hand_inference_update(self, result):
         position_rows = {
             "landlord_up": 1,
@@ -380,8 +417,19 @@ class MainWindow(QtWidgets.QMainWindow):
             if row is None:
                 continue
 
+            observed_info = self.observedRemainingCounts.get(position, {})
+            observed_count = observed_info.get("count")
+            if observed_count is not None:
+                remaining_text = (
+                    f"{observed_count}!"
+                    if observed_info.get("desync")
+                    else f"{observed_count}实"
+                )
+            else:
+                remaining_text = str(data.get("remaining_count", "-"))
+
             values = [
-                str(data.get("remaining_count", "-")),
+                remaining_text,
                 self._format_inference_probability(data, "D"),
                 self._format_inference_probability(data, "X"),
                 self._format_inference_probability(data, "2"),
@@ -395,7 +443,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
                 item.setTextAlignment(QtCore.Qt.AlignCenter)
 
-                if col >= 2 and value.endswith("%"):
+                if col == 1 and value.endswith("!"):
+                    item.setForeground(QtGui.QColor("#ff0000"))
+                    item.setToolTip("微信画面实测张数与动作历史推算不一致")
+                elif col == 1 and value.endswith("实"):
+                    item.setForeground(QtGui.QColor("#0000FF"))
+                    item.setToolTip("微信画面实测剩余张数")
+                elif col >= 2 and value.endswith("%"):
                     try:
                         p = float(value[:-1]) / 100.0
                         if p >= 0.75:
