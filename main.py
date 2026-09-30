@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import sys
 
 
@@ -19,20 +20,47 @@ def _configure_qt_plugin_paths():
 _configure_qt_plugin_paths()
 
 import qasync
+from PyQt5 import QtCore
 
 from main_window import MainWindow
 
-if __name__ == '__main__':
-    app = qasync.QApplication(sys.argv)
 
-    mainWindow = MainWindow()
-    mainWindow.show()
+if __name__ == "__main__":
+    app = qasync.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(True)
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
-    with loop:
-        loop.run_forever()
+    mainWindow = MainWindow()
+    mainWindow.show()
 
-    # Execute application
-    sys.exit(app.exec_())
+    # Keep shutdown state mutable because this code runs at module scope.
+    shutdown_state = {"active": False}
+
+    def shutdown(*_):
+        if shutdown_state["active"]:
+            return
+        shutdown_state["active"] = True
+        print("正在退出程序...")
+        try:
+            mainWindow.close()
+        finally:
+            app.quit()
+
+    # Make Ctrl+C work reliably while Qt owns the foreground event loop.
+    signal.signal(signal.SIGINT, shutdown)
+
+    # On Windows, periodically hand control back to Python so SIGINT is
+    # processed promptly even when there is no other Qt activity.
+    signal_timer = QtCore.QTimer()
+    signal_timer.timeout.connect(lambda: None)
+    signal_timer.start(200)
+
+    app.aboutToQuit.connect(loop.stop)
+
+    try:
+        with loop:
+            loop.run_forever()
+    except KeyboardInterrupt:
+        shutdown()
