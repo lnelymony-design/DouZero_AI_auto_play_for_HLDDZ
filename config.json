@@ -64,5 +64,8 @@
     "risk_adjustment_min_risk_gain": 0.25,
     "risk_adjustment_max_model_gap_fraction": 0.25,
     "risk_adjustment_max_model_rank": 3,
-    "risk_adjustment_response_samples": 240
+    "risk_adjustment_response_samples": 240,
+    "inference_residual_behavior_floor": 0.35,
+    "inference_residual_behavior_strength": 1,
+    "inference_residual_behavior_temperature": 0.55
 }
