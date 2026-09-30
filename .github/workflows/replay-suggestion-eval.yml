@@ -35,7 +35,7 @@ jobs:
             tools/replay_fixtures/game_01.replay.json \
             tools/replay_fixtures/game_02.replay.json \
             tools/replay_fixtures/game_03.replay.json \
-            --weights 0.20 0.30 0.40 \
+            --weights 0.20 0.30 0.40 0.50 0.60 0.70 0.80 \
             --samples 1000 \
             --min-ess 0.40 | tee lambda-eval.txt
       - uses: actions/upload-artifact@v4
