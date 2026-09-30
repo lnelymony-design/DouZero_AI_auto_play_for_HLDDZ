@@ -258,7 +258,7 @@ class WechatCardRecognizer:
         results.sort(key=lambda item: item[0])
         return results
 
-    def _detect_jokers(self, bgr, region):
+    def _detect_jokers(self, bgr, region, compact=False):
         height, width = bgr.shape[:2]
         x0 = int(region[0] * width)
         x1 = int(region[1] * width)
@@ -272,18 +272,35 @@ class WechatCardRecognizer:
         mask = self._ink_mask(roi)
         count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
 
-        min_w = self._scaled(15, width, REFERENCE_WIDTH)
-        max_w = self._scaled(40, width, REFERENCE_WIDTH)
-        min_h = self._scaled(14, height, REFERENCE_HEIGHT)
-        max_h = self._scaled(40, height, REFERENCE_HEIGHT)
-        min_area = max(
-            15,
-            int(
-                120
-                * (width / REFERENCE_WIDTH)
-                * (height / REFERENCE_HEIGHT)
-            ),
-        )
+        if compact:
+            # Opponent-play Jokers are much smaller than Jokers in the local
+            # hand.  The 3rd recording contains a small Joker at ~104s whose
+            # individual J/O/K/E/R glyphs are only 6-15 px wide.
+            min_w = self._scaled(4, width, REFERENCE_WIDTH)
+            max_w = self._scaled(35, width, REFERENCE_WIDTH)
+            min_h = self._scaled(8, height, REFERENCE_HEIGHT)
+            max_h = self._scaled(30, height, REFERENCE_HEIGHT)
+            min_area = max(
+                12,
+                int(
+                    25
+                    * (width / REFERENCE_WIDTH)
+                    * (height / REFERENCE_HEIGHT)
+                ),
+            )
+        else:
+            min_w = self._scaled(15, width, REFERENCE_WIDTH)
+            max_w = self._scaled(40, width, REFERENCE_WIDTH)
+            min_h = self._scaled(14, height, REFERENCE_HEIGHT)
+            max_h = self._scaled(40, height, REFERENCE_HEIGHT)
+            min_area = max(
+                15,
+                int(
+                    120
+                    * (width / REFERENCE_WIDTH)
+                    * (height / REFERENCE_HEIGHT)
+                ),
+            )
 
         components = []
         for index in range(1, count):
@@ -306,7 +323,9 @@ class WechatCardRecognizer:
                 )
 
         clusters = []
-        x_tolerance = self._scaled(8, width, REFERENCE_WIDTH)
+        x_tolerance = self._scaled(
+            12 if compact else 8, width, REFERENCE_WIDTH
+        )
         for component in sorted(components, key=lambda item: item[5]):
             assigned = False
             for cluster in clusters:
@@ -319,7 +338,9 @@ class WechatCardRecognizer:
                 clusters.append([component])
 
         results = []
-        min_span = self._scaled(55, height, REFERENCE_HEIGHT)
+        min_span = self._scaled(
+            45 if compact else 55, height, REFERENCE_HEIGHT
+        )
 
         for cluster in clusters:
             center_ys = [item[6] for item in cluster]
@@ -334,6 +355,18 @@ class WechatCardRecognizer:
             top = min(item[1] for item in cluster)
             right = max(item[0] + item[2] for item in cluster)
             bottom = max(item[1] + item[3] for item in cluster)
+
+            # The actual vertical JOKER word is narrow.  With the relaxed
+            # compact thresholds, UI text/buttons can otherwise form wide fake
+            # vertical clusters.  In the recorded small Joker the cluster is
+            # ~15 px wide; 26 px leaves comfortable scaling margin.
+            if compact:
+                max_cluster_width = self._scaled(
+                    26, width, REFERENCE_WIDTH
+                )
+                if right - left > max_cluster_width:
+                    continue
+
             patch = bgr[top:bottom, left:right]
             hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
             gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
@@ -424,16 +457,29 @@ class WechatCardRecognizer:
         return self._merge_cards(normal, jokers)
 
     def recognize_left_played(self, image, expected_count=None):
-        # Long combinations can extend toward the centre and lower than singles.
+        # Use a narrow strip by default so the previous centre-table play is
+        # not mistaken for the left player's next single.  Only long
+        # combinations widen toward the centre/lower row.
+        region = (
+            (0.08, 0.46, 0.25, 0.47)
+            if expected_count is None or expected_count <= 4
+            else (0.08, 0.48, 0.25, 0.52)
+        )
         return self._recognize_played_with_expected_count(
-            image, (0.08, 0.50, 0.25, 0.55), expected_count
+            image, region, expected_count
         )
 
     def recognize_right_played(self, image, expected_count=None):
-        # The recordings include a 10-card right-side play (AKQJ1098765);
-        # the old narrow crop missed it completely.
+        # The recordings include a 10-card right-side play (AKQJ1098765).
+        # Small plays use a centre-safe crop; long plays widen only when the
+        # remaining-card drop tells us how many cards to expect.
+        region = (
+            (0.54, 0.92, 0.25, 0.47)
+            if expected_count is None or expected_count <= 4
+            else (0.52, 0.92, 0.25, 0.52)
+        )
         return self._recognize_played_with_expected_count(
-            image, (0.50, 0.92, 0.25, 0.58), expected_count
+            image, region, expected_count
         )
 
     def recognize_my_played(self, image, expected_count=None):
@@ -478,7 +524,9 @@ class WechatCardRecognizer:
             region[2],
             min(0.65, region[3] + 0.11),
         )
-        jokers = self._detect_jokers(bgr, joker_region)
+        jokers = self._detect_jokers(
+            bgr, joker_region, compact=True
+        )
         return self._merge_cards(normal, jokers)
 
     def _classify_count_digit(self, normalized):
@@ -500,11 +548,10 @@ class WechatCardRecognizer:
     def recognize_remaining_count(self, image, side, expected=None):
         """Read the blue left/right remaining-card badge.
 
-        Digit prototypes come from the user's WeChat miniapp screenshots.
-        Digits 3/8 are not yet represented by direct samples, so when one of
-        those values is the tracked expectation and a valid badge is present,
-        the expectation is used as a narrow fallback rather than inventing a
-        different observed number.
+        Digit prototypes come from the user's WeChat miniapp screenshots and
+        the three supplied recordings; 0-9 now all have direct glyph samples.
+        The optional expected value is retained only as a narrow fallback for
+        heavily animated/partially occluded badges.
         """
         bgr = self._to_bgr(image)
         if bgr is None or side not in ("left", "right"):
