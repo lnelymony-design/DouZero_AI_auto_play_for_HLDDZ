@@ -463,8 +463,9 @@ class MainWindow(QtWidgets.QMainWindow):
             for info in self.observedRemainingCounts.values()
         )
         status = "状态需校验" if desync else "状态正常"
+        effective = result.get("effective_samples", "-")
         self.inferenceMetaLabel.setText(
-            f"样本 {result.get('samples', '-')} · "
+            f"样本 {result.get('samples', '-')} / 有效 {effective} · "
             f"Pass {result.get('pass_evidence_count', 0)} · {status}"
         )
 
@@ -524,6 +525,18 @@ class MainWindow(QtWidgets.QMainWindow):
                             item.setForeground(QtGui.QColor("#808080"))
                     except ValueError:
                         pass
+
+                    card_by_col = {2: "D", 3: "X", 4: "2", 5: "A", 6: "K"}
+                    card = card_by_col.get(col)
+                    if card:
+                        stats = data.get("cards", {}).get(card, {})
+                        card_name = {"D": "大王", "X": "小王"}.get(card, card)
+                        item.setToolTip(
+                            f"{card_name}：至少1张 {stats.get('one_plus', 0):.0%}\n"
+                            f"至少对子 {stats.get('pair_plus', 0):.0%}\n"
+                            f"至少三张 {stats.get('triple_plus', 0):.0%}\n"
+                            f"四张炸弹 {stats.get('bomb', 0):.0%}"
+                        )
                 self.inferenceTable.setItem(row, col, item)
 
         self._render_remaining_counts()
