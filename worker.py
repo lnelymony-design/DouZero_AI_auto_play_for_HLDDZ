@@ -199,6 +199,8 @@ class WorkerThread(QThread):
         count_desync = {"left": False, "right": False}
         rejected_count_candidate = {"left": None, "right": None}
         confirmed_my_hand = None
+        landlord_debug_saved = False
+        init_wait_last_count = None
 
         def display_cards(cards):
             if not cards:
@@ -260,6 +262,7 @@ class WorkerThread(QThread):
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal wechat_other_hands_cards_str, confirmed_my_hand
+            nonlocal init_wait_last_count
 
             self.my_hand_cards = my_hand
             self.three_cards = three_cards
@@ -299,6 +302,7 @@ class WorkerThread(QThread):
             expected_side = landlord_start_side[position_code]
             round_signature = (my_hand, three_cards, position_code)
             round_initialized = True
+            init_wait_last_count = None
 
             print()
             print("===== 微信牌局状态已初始化 =====")
@@ -392,11 +396,38 @@ class WorkerThread(QThread):
                 ready_hand = last_state["my_hand"] or ""
                 ready_three = last_state["three_cards"] or ""
                 ready_position = last_state["position_code"]
-                ready = (
-                    len(ready_hand) in (17, 20)
-                    and len(ready_three) == 3
-                    and ready_position is not None
+                expected_initial_count = (
+                    20 if ready_position == 1 else 17
+                    if ready_position is not None else None
                 )
+                ready = (
+                    expected_initial_count is not None
+                    and len(ready_hand) == expected_initial_count
+                    and len(ready_three) == 3
+                )
+
+                if (
+                    not round_initialized
+                    and ready_position is not None
+                    and expected_initial_count is not None
+                    and len(ready_hand) != expected_initial_count
+                ):
+                    if init_wait_last_count != len(ready_hand):
+                        position_name = "地主" if ready_position == 1 else "农民"
+                        print(
+                            f"初始化等待 >>> 当前{position_name}应为 "
+                            f"{expected_initial_count} 张，识别到 {len(ready_hand)} 张"
+                        )
+                        init_wait_last_count = len(ready_hand)
+
+                    if ready_position == 1 and not landlord_debug_saved:
+                        os.makedirs('screenshots', exist_ok=True)
+                        debug_path = os.path.join(
+                            'screenshots', 'wechat_landlord_debug.png'
+                        )
+                        screenshot.save(debug_path)
+                        landlord_debug_saved = True
+                        print(f"地主20张调试截图已保存：{debug_path}")
 
                 if ready:
                     signature = (ready_hand, ready_three, ready_position)
