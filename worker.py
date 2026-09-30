@@ -198,6 +198,8 @@ class WorkerThread(QThread):
             "left": {"cards": "", "time": 0.0},
             "right": {"cards": "", "time": 0.0},
         }
+        count_missing_frames = {"left": 0, "right": 0}
+        self_hand_missing_frames = 0
         pass_latched = {"left": False, "right": False, "me": False}
         last_state = {
             "three_cards": None,
@@ -397,6 +399,16 @@ class WorkerThread(QThread):
                     side: recognizer.recognize_remaining_count(screenshot, side, expected=None)
                     for side in ("left", "right")
                 }
+                for side in ("left", "right"):
+                    if raw_counts[side] is None:
+                        count_missing_frames[side] += 1
+                    else:
+                        count_missing_frames[side] = 0
+
+                if round_initialized and not raw_hand:
+                    self_hand_missing_frames += 1
+                else:
+                    self_hand_missing_frames = 0
                 live_counts = {
                     side: stable_value(f"live_{side}_count", raw_counts[side], frames=4)
                     for side in ("left", "right")
@@ -510,28 +522,67 @@ class WorkerThread(QThread):
                 # Prefer an action from the currently expected seat.  If a later
                 # seat has hard evidence, skipped seats are logically Pass.
                 self_removed = None
+                self_final_out = False
                 if live_hand and confirmed_my_hand and live_hand != confirmed_my_hand:
                     self_removed = hand_difference(confirmed_my_hand, live_hand)
                     if self_removed == "":
                         confirmed_my_hand = live_hand
                         self_removed = None
 
+                if (
+                    not self_removed
+                    and confirmed_my_hand
+                    and self_hand_missing_frames >= 4
+                ):
+                    final_cards = recognizer.recognize_my_played(
+                        screenshot, expected_count=len(confirmed_my_hand)
+                    )
+                    if final_cards and len(final_cards) == len(confirmed_my_hand):
+                        self_removed = final_cards
+                        self_final_out = True
+
                 def opponent_candidate(side):
                     new_count = live_counts.get(side)
                     old_count = tracked_remaining.get(side)
-                    if (
+                    if old_count is None:
+                        return None
+
+                    drop = None
+                    target_count = None
+                    source = None
+                    if new_count is not None and new_count < old_count:
+                        drop = old_count - new_count
+                        target_count = new_count
+                        source = "剩余张数下降"
+                    elif (
                         new_count is None
-                        or old_count is None
-                        or new_count >= old_count
+                        and count_missing_frames[side] >= 4
+                        and old_count > 0
                     ):
+                        # On the final play the blue count badge disappears
+                        # immediately instead of showing 0.  If the visible
+                        # play contains every remaining card, that is hard
+                        # evidence that the player went out.
+                        drop = old_count
+                        target_count = 0
+                        source = "牌数框消失+全手出完"
+                    else:
                         return None
-                    drop = old_count - new_count
+
                     info = recent_play[side]
-                    if now - info["time"] > 3.0:
-                        return None
-                    cards = info["cards"]
+                    cards = info["cards"] if now - info["time"] <= 3.0 else ""
+                    if not cards or len(cards) != drop:
+                        if side == "left":
+                            cards = recognizer.recognize_left_played(
+                                screenshot, expected_count=drop
+                            )
+                        else:
+                            cards = recognizer.recognize_right_played(
+                                screenshot, expected_count=drop
+                            )
+
                     if cards and len(cards) == drop:
-                        return (cards, new_count)
+                        return (cards, target_count, source)
                     return None
 
                 action_committed = False
@@ -574,24 +625,24 @@ class WorkerThread(QThread):
                         print(f"微信牌局 >>> 我的出牌: {display_cards(payload)}")
                         self.played_card_signal.emit([self.my_position, payload])
                         self.record_hand_inference_action(self.my_position, payload)
-                        confirmed_my_hand = live_hand
+                        confirmed_my_hand = "" if self_final_out else live_hand
                         self_removed = None
                         expected_side = "right"
                         action_committed = True
-                        if len(confirmed_my_hand) == 0:
+                        if self_final_out or not confirmed_my_hand:
                             print("微信牌局 >>> 我的手牌归零，本局结束")
                             round_initialized = False
                             expected_side = None
                             break
                     else:
-                        cards, new_count = payload
+                        cards, new_count, evidence = payload
                         player = player_for_side(actor)
                         if player is None:
                             break
                         label = "左侧" if actor == "left" else "右侧"
                         print(
                             f"微信牌局 >>> {label}出牌: {display_cards(cards)} "
-                            f"[剩余 {tracked_remaining[actor]}→{new_count}]"
+                            f"[剩余 {tracked_remaining[actor]}→{new_count}；{evidence}]"
                         )
                         self.played_card_signal.emit([player, cards])
                         wechat_other_hands_cards_str = remove_chars_from_string(
