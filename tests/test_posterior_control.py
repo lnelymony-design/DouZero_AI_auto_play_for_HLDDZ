@@ -76,6 +76,22 @@ class PosteriorControlTests(unittest.TestCase):
             result["residual_behavior_temperature_configured"],
         )
 
+    def test_behavior_shift_is_exposed_for_auditing(self):
+        engine = self._engine()
+        engine.observe("landlord_down", "K")
+        result = engine.infer()
+        player = result["players"]["landlord_down"]
+        self.assertIn("top_behavior_shifts", player)
+        self.assertTrue(player["top_behavior_shifts"])
+        self.assertIn(
+            "prior_one_plus",
+            player["cards"]["K"],
+        )
+        self.assertIn(
+            "behavior_delta",
+            player["cards"]["K"],
+        )
+
     def test_posterior_worlds_are_joint_and_normalized(self):
         engine = self._engine()
         engine.observe("landlord_down", "7")
