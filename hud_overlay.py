@@ -251,6 +251,15 @@ class HudOverlayManager(QtCore.QObject):
         self.set_visible(not self.visible)
         return self.visible
 
+    def reset_positions(self):
+        defaults = self._default_positions()
+        for panel_id, panel in self.panels.items():
+            panel.move(defaults[panel_id])
+            self.settings.setValue(
+                f"panels/{panel_id}/pos", defaults[panel_id]
+            )
+        self.settings.sync()
+
     def show(self):
         self.set_visible(True)
 
