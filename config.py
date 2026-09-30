@@ -34,6 +34,14 @@ class Config:
     risk_adjustment_max_model_gap_fraction: float
     risk_adjustment_max_model_rank: int
     risk_adjustment_response_samples: int
+    rollout_enabled: bool
+    rollout_shadow_mode: bool
+    rollout_max_worlds: int
+    rollout_min_worlds: int
+    rollout_max_steps: int
+    rollout_time_budget_seconds: float
+    rollout_min_ess_ratio: float
+    rollout_min_value_gain: float
     
     def __init__(self, **kwargs) -> None:
         self.window_width = kwargs.get('window_width', 1600)
@@ -68,6 +76,14 @@ class Config:
         self.risk_adjustment_max_model_gap_fraction = kwargs.get('risk_adjustment_max_model_gap_fraction', 0.25)
         self.risk_adjustment_max_model_rank = kwargs.get('risk_adjustment_max_model_rank', 3)
         self.risk_adjustment_response_samples = kwargs.get('risk_adjustment_response_samples', 240)
+        self.rollout_enabled = kwargs.get('rollout_enabled', True)
+        self.rollout_shadow_mode = kwargs.get('rollout_shadow_mode', True)
+        self.rollout_max_worlds = kwargs.get('rollout_max_worlds', 8)
+        self.rollout_min_worlds = kwargs.get('rollout_min_worlds', 3)
+        self.rollout_max_steps = kwargs.get('rollout_max_steps', 72)
+        self.rollout_time_budget_seconds = kwargs.get('rollout_time_budget_seconds', 8.0)
+        self.rollout_min_ess_ratio = kwargs.get('rollout_min_ess_ratio', 0.35)
+        self.rollout_min_value_gain = kwargs.get('rollout_min_value_gain', 0.15)
     
     @classmethod
     def load(cls):
