@@ -216,6 +216,8 @@ class WorkerThread(QThread):
         douzero_paused_reason = None
         suggestion_audit = []
         pending_round_audit = None
+        last_init_diag_signature = None
+        last_init_diag_time = 0.0
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -811,8 +813,9 @@ class WorkerThread(QThread):
                         print(f"微信专用识牌 >>> 我的身份: {position_text} [{evidence}]")
                         last_state["position_code"] = position_code
 
+                    raw_bottom = recognizer.recognize_bottom_cards(screenshot)
                     top_bottom = stable_value(
-                        "three_cards", recognizer.recognize_bottom_cards(screenshot), frames=2
+                        "three_cards", raw_bottom, frames=2
                     )
                     three_cards = top_bottom
                     if (
@@ -846,6 +849,109 @@ class WorkerThread(QThread):
                         else 17 if ready_position is not None
                         else None
                     )
+
+                    hand_pending = pending.get("init_hand", (None, 0))[1]
+                    left_count_pending = pending.get(
+                        "live_left_count", (None, 0)
+                    )[1]
+                    right_count_pending = pending.get(
+                        "live_right_count", (None, 0)
+                    )[1]
+                    role_pending = pending.get(
+                        "position_code", (None, 0)
+                    )[1]
+                    bottom_pending = pending.get(
+                        "three_cards", (None, 0)
+                    )[1]
+
+                    wait_reasons = []
+                    if ready_position is None:
+                        wait_reasons.append("身份尚未稳定")
+                    if expected_count is None:
+                        wait_reasons.append("无法确定目标手牌张数")
+                    elif len(ready_hand) != expected_count:
+                        if not raw_hand:
+                            wait_reasons.append(
+                                f"未识别到手牌(目标{expected_count}张)"
+                            )
+                        elif init_hand is None:
+                            wait_reasons.append(
+                                f"手牌未稳定(raw={len(raw_hand)}张, "
+                                f"连续{hand_pending}/5帧, 目标{expected_count}张)"
+                            )
+                        else:
+                            wait_reasons.append(
+                                f"稳定手牌张数不符("
+                                f"{len(ready_hand)}/{expected_count})"
+                            )
+                    if len(ready_three) != 3:
+                        if not raw_bottom:
+                            wait_reasons.append("未识别到三张底牌")
+                        elif top_bottom is None:
+                            wait_reasons.append(
+                                f"底牌未稳定(raw={display_cards(raw_bottom)}, "
+                                f"连续{bottom_pending}/2帧)"
+                            )
+                        else:
+                            wait_reasons.append(
+                                f"底牌张数异常({len(top_bottom)}张)"
+                            )
+
+                    diag_signature = (
+                        raw_hand,
+                        init_hand,
+                        raw_counts.get("left"),
+                        live_counts.get("left"),
+                        raw_counts.get("right"),
+                        live_counts.get("right"),
+                        landlord_side,
+                        badge_position,
+                        inferred_position,
+                        position_code,
+                        raw_bottom,
+                        top_bottom,
+                        tuple(wait_reasons),
+                    )
+                    if (
+                        diag_signature != last_init_diag_signature
+                        or now - last_init_diag_time >= 2.0
+                    ):
+                        print(
+                            f"[INIT/HAND] raw={len(raw_hand) if raw_hand else 0} "
+                            f"[{display_cards(raw_hand)}] | "
+                            f"stable={len(init_hand) if init_hand else 0} "
+                            f"[{display_cards(init_hand)}] | "
+                            f"连续={hand_pending}/5 | "
+                            f"目标={expected_count if expected_count is not None else '-'}"
+                        )
+                        print(
+                            f"[INIT/COUNT] 左 raw={raw_counts.get('left')} "
+                            f"stable={live_counts.get('left')} "
+                            f"连续={left_count_pending}/4 cache={preinit_counts['left']} | "
+                            f"右 raw={raw_counts.get('right')} "
+                            f"stable={live_counts.get('right')} "
+                            f"连续={right_count_pending}/4 cache={preinit_counts['right']}"
+                        )
+                        print(
+                            f"[INIT/ROLE] badge={landlord_side or '-'} "
+                            f"badge_stable={badge_position} "
+                            f"inferred={inferred_position} "
+                            f"stable={position_code} 连续={role_pending}/3 "
+                            f"committed={last_state['position_code']}"
+                        )
+                        print(
+                            f"[INIT/BOTTOM] raw={display_cards(raw_bottom)} "
+                            f"stable={display_cards(top_bottom)} "
+                            f"连续={bottom_pending}/2 "
+                            f"committed={display_cards(last_state['three_cards'])}"
+                        )
+                        if wait_reasons:
+                            print("[INIT/WAIT] " + "；".join(wait_reasons))
+                        else:
+                            print("[INIT/READY] 初始化条件全部满足")
+                        print()
+                        last_init_diag_signature = diag_signature
+                        last_init_diag_time = now
                     if (
                         expected_count is not None
                         and len(ready_hand) == expected_count
