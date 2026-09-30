@@ -90,21 +90,29 @@ def load_audits(audit_dir):
             print(f"跳过 {path}: JSON读取失败: {exc}")
             continue
 
-        image_name = payload.get("screenshot")
-        if not image_name:
+        # v2 stores a burst of settlement frames; keep v1 compatibility.
+        image_names = payload.get("screenshots") or []
+        if not image_names and payload.get("screenshot"):
+            image_names = [payload["screenshot"]]
+        if not image_names:
             print(f"跳过 {path}: 没有结算截图")
             continue
 
-        image_path = os.path.join(audit_dir, image_name)
-        image = cv2.imread(image_path)
-        if image is None:
-            print(f"跳过 {path}: 无法读取 {image_path}")
+        images = []
+        for image_name in image_names:
+            image_path = os.path.join(audit_dir, image_name)
+            image = cv2.imread(image_path)
+            if image is not None:
+                images.append((image_name, image))
+        if not images:
+            print(f"跳过 {path}: 所有结算截图都无法读取")
             continue
 
         my_position = payload.get("my_position")
         side_map = SIDE_POSITION_MAP.get(my_position, {})
         tracked = payload.get("tracked_remaining", {})
         actual_hands = {}
+        actual_sources = {}
 
         for side in ("left", "right"):
             position = side_map.get(side)
@@ -118,29 +126,45 @@ def load_audits(audit_dir):
 
             if expected_count == 0:
                 actual_hands[position] = ""
+                actual_sources[position] = "winner_zero"
                 continue
 
-            if side == "left":
-                cards = recognizer.recognize_left_played(
-                    image,
-                    expected_count=expected_count,
-                )
-            else:
-                cards = recognizer.recognize_right_played(
-                    image,
-                    expected_count=expected_count,
-                )
+            candidates = []
+            for image_name, image in images:
+                if side == "left":
+                    cards = recognizer.recognize_left_played(
+                        image,
+                        expected_count=expected_count,
+                    )
+                else:
+                    cards = recognizer.recognize_right_played(
+                        image,
+                        expected_count=expected_count,
+                    )
+                if len(cards) == expected_count:
+                    candidates.append((cards, image_name))
 
-            if len(cards) != expected_count:
+            if not candidates:
                 print(
-                    f"{os.path.basename(path)}: {side}结算手牌读取到"
-                    f"{len(cards)}张，期望{expected_count}张，暂不用于评分"
+                    f"{os.path.basename(path)}: {side}在"
+                    f"{len(images)}张结算截图中都未完整识别"
+                    f"{expected_count}张，暂不用于评分"
                 )
                 continue
-            actual_hands[position] = cards
+
+            # If several burst frames work, use the most frequently repeated
+            # recognition.  This rejects one-frame animation/OCR glitches.
+            frequency = Counter(cards for cards, _ in candidates)
+            best_cards, _ = frequency.most_common(1)[0]
+            source_name = next(
+                name for cards, name in candidates if cards == best_cards
+            )
+            actual_hands[position] = best_cards
+            actual_sources[position] = source_name
 
         payload["_path"] = path
         payload["_actual_hands"] = actual_hands
+        payload["_actual_sources"] = actual_sources
         audits.append(payload)
 
     return audits
