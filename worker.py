@@ -162,18 +162,29 @@ class WorkerThread(QThread):
             print()
 
     async def run_wechat_probe(self):
-        """Read-only first-stage adapter for the WeChat miniapp.
+        """Read-only WeChat recognizer probe.
 
-        It verifies title-based window capture and saves one clean client-area
-        screenshot for calibration. QQ-game-hall templates are intentionally not
-        used here because their coordinates/assets do not match the miniapp UI.
+        Reuses the original Tencent card templates with WeChat-specific regions.
+        It never clicks the game. State changes are printed so live calibration
+        can be validated before enabling the normal DouZero flow.
         """
-        print("微信小程序只读适配模式已启动")
-        print("当前阶段：连接游戏窗口并采集标定截图，不会自动点击游戏")
+        print("微信小程序只读识别模式已启动")
+        print("当前阶段：识别手牌 / 底牌 / 地主位置 / 左右出牌 / 不出，不会自动点击游戏")
         print()
 
         screenshot_saved = False
         missing_reported = False
+        last_state = {
+            "my_hand": None,
+            "three_cards": None,
+            "my_position_code": None,
+            "left_played": None,
+            "right_played": None,
+            "my_played": None,
+            "left_pass": None,
+            "right_pass": None,
+            "my_pass": None,
+        }
 
         while self.worker_runing:
             screenshot, _ = await self.screenHelper.getScreenshot()
@@ -197,13 +208,88 @@ class WorkerThread(QThread):
                 print(f"已连接微信斗地主窗口：{title} [{class_name}]")
                 print(f"客户区截图尺寸：{screenshot.size[0]} x {screenshot.size[1]}")
                 print(f"标定截图已保存：{calibration_path}")
-                print("等待微信牌面识别适配；可随时点击‘停止’或关闭辅助窗口")
                 print()
                 screenshot_saved = True
 
-            await asyncio.sleep(0.5)
+            try:
+                my_hand = await self.gameHelper.get_my_hand_cards()
+                if my_hand != last_state["my_hand"]:
+                    print(f"微信识牌 >>> 我的手牌({len(my_hand)}): {my_hand or '-'}")
+                    last_state["my_hand"] = my_hand
 
-        print("微信小程序只读适配线程已停止")
+                three_cards = await self.gameHelper.get_three_cards()
+                if three_cards != last_state["three_cards"]:
+                    print(f"微信识牌 >>> 三张底牌({len(three_cards)}): {three_cards or '-'}")
+                    last_state["three_cards"] = three_cards
+
+                position_code = await self.gameHelper.get_my_position()
+                if position_code != last_state["my_position_code"]:
+                    position_text = {
+                        0: "农民（地主上家）",
+                        1: "地主",
+                        2: "农民（地主下家）",
+                        None: "未识别",
+                    }.get(position_code, str(position_code))
+                    print(f"微信识牌 >>> 我的身份: {position_text}")
+                    last_state["my_position_code"] = position_code
+                    if position_code is not None:
+                        self.my_position_signal.emit(PlayerPosition[position_code])
+
+                left_played = await self.gameHelper.get_left_played_cards()
+                if left_played != last_state["left_played"]:
+                    print(f"微信识牌 >>> 左侧出牌: {left_played or '-'}")
+                    last_state["left_played"] = left_played
+
+                right_played = await self.gameHelper.get_right_played_cards()
+                if right_played != last_state["right_played"]:
+                    print(f"微信识牌 >>> 右侧出牌: {right_played or '-'}")
+                    last_state["right_played"] = right_played
+
+                my_played = await self.gameHelper.get_my_played_cards()
+                if my_played != last_state["my_played"]:
+                    print(f"微信识牌 >>> 我的出牌: {my_played or '-'}")
+                    last_state["my_played"] = my_played
+
+                left_pass = await self.gameHelper.get_left_played_text(template='buchu') is not None
+                if left_pass != last_state["left_pass"]:
+                    if left_pass:
+                        print("微信识牌 >>> 左侧玩家：不出")
+                    last_state["left_pass"] = left_pass
+
+                right_pass = await self.gameHelper.get_right_played_text(template='buchu') is not None
+                if right_pass != last_state["right_pass"]:
+                    if right_pass:
+                        print("微信识牌 >>> 右侧玩家：不出")
+                    last_state["right_pass"] = right_pass
+
+                my_pass = await self.gameHelper.get_my_played_text(template='buchu') is not None
+                if my_pass != last_state["my_pass"]:
+                    if my_pass:
+                        print("微信识牌 >>> 我：不出")
+                    last_state["my_pass"] = my_pass
+
+                if my_hand and len(my_hand) in (17, 20):
+                    self.my_hand_cards = my_hand
+                    remaining = []
+                    my_env = [RealCard2EnvCard[ch] for ch in list(my_hand)]
+                    for card in AllEnvCard:
+                        if card in my_env:
+                            my_env.remove(card)
+                        else:
+                            remaining.append(card)
+                    self.card_recorder_signal.emit(
+                        ''.join([EnvCard2RealCard[x] for x in remaining])[::-1]
+                    )
+
+                if len(three_cards) == 3:
+                    self.three_cards_signal.emit(three_cards)
+
+            except Exception as exc:
+                print(f"微信只读识别异常（不会退出线程）: {exc}")
+
+            await asyncio.sleep(0.7)
+
+        print("微信小程序只读识别线程已停止")
         print()
 
     async def before_start(self):
