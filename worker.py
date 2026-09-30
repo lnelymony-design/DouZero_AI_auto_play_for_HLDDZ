@@ -220,6 +220,15 @@ class WorkerThread(QThread):
             display_map = {"D": "大王", "X": "小王", "T": "10"}
             return " ".join(display_map.get(card, card) for card in cards)
 
+        def is_legal_play(cards):
+            if not cards:
+                return False
+            try:
+                env_cards = sorted([RealCard2EnvCard[card] for card in cards])
+                return get_move_type(env_cards).get("type") != 15
+            except Exception:
+                return False
+
         def hand_difference(before, after):
             """Return cards removed from before to after; None if after is impossible."""
             before_counter = Counter(before)
@@ -294,6 +303,9 @@ class WorkerThread(QThread):
 
         def emit_douzero_suggestion_if_my_turn():
             nonlocal douzero_paused_reason
+            if any(count_desync.values()):
+                pause_douzero("等待对手出牌与剩余张数完成匹配")
+                return
             if self.env is None or self.env.game_over:
                 self.ai_suggestion_signal.emit([])
                 return
@@ -677,6 +689,12 @@ class WorkerThread(QThread):
                     if self_removed == "":
                         confirmed_my_hand = live_hand
                         self_removed = None
+                    elif self_removed and not is_legal_play(self_removed):
+                        print(
+                            f"手牌差分候选未采信 >>> {display_cards(self_removed)} "
+                            "不是合法牌型，等待下一帧"
+                        )
+                        self_removed = None
 
                 if (
                     not self_removed
@@ -686,7 +704,11 @@ class WorkerThread(QThread):
                     final_cards = recognizer.recognize_my_played(
                         screenshot, expected_count=len(confirmed_my_hand)
                     )
-                    if final_cards and len(final_cards) == len(confirmed_my_hand):
+                    if (
+                        final_cards
+                        and len(final_cards) == len(confirmed_my_hand)
+                        and is_legal_play(final_cards)
+                    ):
                         self_removed = final_cards
                         self_final_out = True
 
@@ -730,8 +752,14 @@ class WorkerThread(QThread):
                                 screenshot, expected_count=drop
                             )
 
-                    if cards and len(cards) == drop:
+                    if cards and len(cards) == drop and is_legal_play(cards):
                         return (cards, target_count, source)
+                    if cards and len(cards) == drop and not is_legal_play(cards):
+                        print(
+                            f"对手出牌候选未采信 >>> "
+                            f"{'左侧' if side == 'left' else '右侧'} "
+                            f"{display_cards(cards)} 张数正确但牌型不合法"
+                        )
                     return None
 
                 action_committed = False
