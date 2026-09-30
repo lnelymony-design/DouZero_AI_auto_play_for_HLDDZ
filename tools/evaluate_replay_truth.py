@@ -129,9 +129,18 @@ def evaluate(
                             truth["final_hands"],
                             action,
                         )
+                        is_enemy = (
+                            (mine == "landlord"
+                             and logical_player != "landlord")
+                            or
+                            (mine != "landlord"
+                             and logical_player == "landlord")
+                        )
                         side_candidates.append(
                             (
                                 physical_side,
+                                logical_player,
+                                "enemy" if is_enemy else "teammate",
                                 float(side_profile["can_beat"]),
                                 bool(side_truth),
                             )
@@ -292,26 +301,50 @@ def main():
                 f"actual={mean(float(x[1]) for x in rows):.1%}"
             )
 
-    print("\n=== PHYSICAL-SIDE RESPONSE CALIBRATION ===")
-    for physical_side in ("left", "right"):
-        rows = [
-            (pred, truth)
-            for side, pred, truth in all_side_candidates
-            if side == physical_side
-        ]
+    def print_calibration(label, rows):
         if not rows:
-            print(f"{physical_side}: no data")
-            continue
-        side_brier = mean(
+            print(f"{label}: no data")
+            return
+        score = mean(
             (pred - float(truth)) ** 2
             for pred, truth in rows
         )
         print(
-            f"{physical_side}: n={len(rows)} "
-            f"Brier={side_brier:.4f} "
+            f"{label}: n={len(rows)} "
+            f"Brier={score:.4f} "
             f"pred={mean(pred for pred, _ in rows):.1%} "
             f"actual={mean(float(truth) for _, truth in rows):.1%}"
         )
+
+    print("\n=== PHYSICAL-SIDE RESPONSE CALIBRATION ===")
+    for physical_side in ("left", "right"):
+        rows = [
+            (pred, truth)
+            for side, logical, relation, pred, truth
+            in all_side_candidates
+            if side == physical_side
+        ]
+        print_calibration(physical_side, rows)
+
+    print("\n=== LOGICAL-POSITION RESPONSE CALIBRATION ===")
+    for logical_player in POSITIONS:
+        rows = [
+            (pred, truth)
+            for side, logical, relation, pred, truth
+            in all_side_candidates
+            if logical == logical_player
+        ]
+        print_calibration(logical_player, rows)
+
+    print("\n=== RELATION RESPONSE CALIBRATION ===")
+    for relation_name in ("enemy", "teammate"):
+        rows = [
+            (pred, truth)
+            for side, logical, relation, pred, truth
+            in all_side_candidates
+            if relation == relation_name
+        ]
+        print_calibration(relation_name, rows)
 
     raw = [
         float(row["raw_truth"]) for row in all_decisions
