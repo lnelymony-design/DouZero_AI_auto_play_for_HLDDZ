@@ -58,7 +58,7 @@
     "inference_play_behavior_strength": 1,
     "inference_behavior_temperature": 0.75,
     "inference_min_effective_sample_ratio": 0.28,
-    "risk_adjustment_enabled": true,
+    "risk_adjustment_enabled": false,
     "risk_adjustment_weight": 0.45,
     "risk_adjustment_min_ess_ratio": 0.45,
     "risk_adjustment_min_risk_gain": 0.25,
@@ -67,5 +67,13 @@
     "risk_adjustment_response_samples": 240,
     "inference_residual_behavior_floor": 0.35,
     "inference_residual_behavior_strength": 1,
-    "inference_residual_behavior_temperature": 0.55
+    "inference_residual_behavior_temperature": 0.55,
+    "rollout_enabled": true,
+    "rollout_shadow_mode": true,
+    "rollout_max_worlds": 8,
+    "rollout_min_worlds": 3,
+    "rollout_max_steps": 72,
+    "rollout_time_budget_seconds": 8,
+    "rollout_min_ess_ratio": 0.35,
+    "rollout_min_value_gain": 0.15
 }
