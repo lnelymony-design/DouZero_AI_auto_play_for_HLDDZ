@@ -11,6 +11,7 @@ import random
 
 from constants import AllEnvCard, EnvCard2RealCard, RealCard2EnvCard
 from douzero.env import move_detector as md
+from douzero.env.move_generator import MovesGener
 from .legality import can_beat, _candidate_responses
 
 POSITIONS = ("landlord", "landlord_up", "landlord_down")
@@ -58,6 +59,9 @@ class HandInferenceEngine:
         play_behavior_strength=1.0,
         behavior_temperature=0.75,
         min_effective_sample_ratio=0.28,
+        residual_behavior_floor=0.35,
+        residual_behavior_strength=1.0,
+        residual_behavior_temperature=0.55,
         random_seed=None,
     ):
         if my_position not in POSITIONS:
@@ -81,6 +85,20 @@ class HandInferenceEngine:
         )
         self.min_effective_sample_ratio = min(
             0.8, max(0.05, float(min_effective_sample_ratio))
+        )
+        # Second-stage posterior weighting.  The first behavior stage answers
+        # "could this sampled hand plausibly have produced the observed play?".
+        # This stage asks the narrower follow-up:
+        # "after making that play, is the residual hand shape/control plan
+        # plausible compared with nearby legal alternatives?"
+        self.residual_behavior_floor = min(
+            0.95, max(0.10, float(residual_behavior_floor))
+        )
+        self.residual_behavior_strength = min(
+            3.0, max(0.0, float(residual_behavior_strength))
+        )
+        self.residual_behavior_temperature = min(
+            1.0, max(0.0, float(residual_behavior_temperature))
         )
         # Common random numbers make adjacent public states comparable and keep
         # the UI from flickering purely because a fresh Monte-Carlo stream was
@@ -177,6 +195,7 @@ class HandInferenceEngine:
         last_move = ""
         last_player = None
         pass_streak = 0
+        remaining_now = dict(INITIAL_HAND_SIZES)
 
         for idx, (player, action) in enumerate(self.history):
             future_cards = []
@@ -198,8 +217,18 @@ class HandInferenceEngine:
             else:
                 if player in self.opponents:
                     play_contexts.append(
-                        (player, action, last_player, last_move, future_cards)
+                        (
+                            player,
+                            action,
+                            last_player,
+                            last_move,
+                            future_cards,
+                            dict(remaining_now),
+                        )
                     )
+                remaining_now[player] = max(
+                    0, remaining_now[player] - len(action)
+                )
                 last_move = action
                 last_player = player
                 pass_streak = 0
@@ -301,6 +330,164 @@ class HandInferenceEngine:
             raw ** self.play_behavior_strength,
         )
 
+    @staticmethod
+    def _run_bonus(flags, minimum):
+        """Return a small bonus for long consecutive rank runs."""
+        best = current = 0
+        for present in flags:
+            if present:
+                current += 1
+                best = max(best, current)
+            else:
+                current = 0
+        return max(0, best - minimum + 1)
+
+    def _residual_hand_score(self, cards):
+        """Cheap strategic-quality proxy for a residual hand.
+
+        This is intentionally a weak likelihood feature, not a move evaluator.
+        It rewards coherent groups, sequence potential and retained control
+        cards while penalising isolated singles.  Only *relative* differences
+        among nearby legal alternatives are used.
+        """
+        counts = Counter(cards)
+        singles = sum(1 for n in counts.values() if n == 1)
+        pairs = sum(1 for n in counts.values() if n == 2)
+        triples = sum(1 for n in counts.values() if n == 3)
+        bombs = sum(1 for n in counts.values() if n >= 4)
+        rocket = int(counts["D"] > 0 and counts["X"] > 0)
+
+        normal = ("3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A")
+        straight_bonus = self._run_bonus(
+            [counts[r] >= 1 for r in normal], 5
+        )
+        pair_run_bonus = self._run_bonus(
+            [counts[r] >= 2 for r in normal], 3
+        )
+
+        control = (
+            0.55 * counts["D"]
+            + 0.42 * counts["X"]
+            + 0.24 * counts["2"]
+            + 0.08 * counts["A"]
+        )
+
+        return (
+            -0.34 * singles
+            + 0.10 * pairs
+            + 0.24 * triples
+            + 0.52 * bombs
+            + 0.36 * rocket
+            + 0.09 * straight_bonus
+            + 0.12 * pair_run_bonus
+            + control
+        )
+
+    @staticmethod
+    def _remove_action_from_hand(hand, action):
+        remaining = Counter(hand)
+        remaining.subtract(Counter(action))
+        if any(v < 0 for v in remaining.values()):
+            return None
+        return _expand(Counter({k: v for k, v in remaining.items() if v > 0}))
+
+    def _nearby_legal_alternatives(self, reconstructed_hand, action, rival_action):
+        """Return structurally comparable alternatives to the observed play."""
+        action_env = sorted(RealCard2EnvCard[c] for c in action)
+        action_info = md.get_move_type(action_env)
+        action_type = action_info.get("type")
+        action_len = len(action_env)
+        hand_env = sorted(RealCard2EnvCard[c] for c in reconstructed_hand)
+
+        if rival_action:
+            rival_env = sorted(RealCard2EnvCard[c] for c in rival_action)
+            candidates = _candidate_responses(hand_env, rival_env)
+        else:
+            candidates = MovesGener(hand_env).gen_moves()
+
+        comparable = []
+        seen = set()
+        for move in candidates:
+            move = sorted(move)
+            if not move:
+                continue
+            info = md.get_move_type(move)
+            if info.get("type") != action_type or len(move) != action_len:
+                continue
+            key = tuple(move)
+            if key in seen:
+                continue
+            seen.add(key)
+            comparable.append(move)
+            if len(comparable) >= 24:
+                break
+
+        if tuple(action_env) not in seen:
+            comparable.append(action_env)
+        return comparable
+
+    def _residual_strategy_factor(
+        self,
+        reconstructed_hand,
+        action,
+        rival_action,
+        rival_player=None,
+        remaining_before=None,
+    ):
+        """Second likelihood weight based on the hand left after the play.
+
+        Example: if a sampled world says a player had KK plus many clean
+        alternatives, but they chose to lead a single K and leave an awkward K,
+        that world becomes less likely.  Conversely a play that preserves a
+        coherent pair/straight/control structure is more plausible.
+
+        Emergency defence is treated more softly: when an enemy is nearly out
+        of cards, spending control cards can be strategically reasonable.
+        """
+        if not action or self.residual_behavior_strength <= 0:
+            return 1.0
+
+        observed_remaining = self._remove_action_from_hand(
+            reconstructed_hand, action
+        )
+        if observed_remaining is None:
+            return self.residual_behavior_floor
+
+        alternatives = self._nearby_legal_alternatives(
+            reconstructed_hand, action, rival_action
+        )
+        if len(alternatives) <= 1:
+            return 1.0
+
+        observed_score = self._residual_hand_score(observed_remaining)
+        scores = []
+        for move in alternatives:
+            move_real = [EnvCard2RealCard[c] for c in move]
+            rest = self._remove_action_from_hand(reconstructed_hand, move_real)
+            if rest is not None:
+                scores.append(self._residual_hand_score(rest))
+        if not scores:
+            return 1.0
+
+        best_score = max(scores)
+        gap = max(0.0, best_score - observed_score)
+        if gap <= 1e-9:
+            return 1.0
+
+        emergency = False
+        if rival_player and remaining_before:
+            rival_left = remaining_before.get(rival_player)
+            if (
+                rival_left is not None
+                and rival_left <= 2
+                and not self._same_team(rival_player, self.my_position)
+            ):
+                emergency = True
+
+        strength = self.residual_behavior_strength * (0.35 if emergency else 1.0)
+        factor = math.exp(-strength * gap)
+        return max(self.residual_behavior_floor, min(1.0, factor))
+
     def _sample_current_hands(self, hidden_pool, remaining_counts, forced_landlord):
         pool = Counter(hidden_pool)
         hands = {p: [] for p in self.opponents}
@@ -388,6 +575,46 @@ class HandInferenceEngine:
                 high = mid
         return low
 
+    def _choose_second_stage_temperature(
+        self, base_weights, residual_log_weights, max_exponent
+    ):
+        """Apply as much residual-hand weighting as ESS safely allows."""
+        if (
+            not base_weights
+            or not residual_log_weights
+            or max_exponent <= 0
+        ):
+            return 0.0
+
+        max_log = max(residual_log_weights)
+
+        def combined(exponent):
+            return [
+                base * math.exp((logw - max_log) * exponent)
+                for base, logw in zip(base_weights, residual_log_weights)
+            ]
+
+        if (
+            self._effective_sample_ratio_from_weights(
+                combined(max_exponent)
+            )
+            >= self.min_effective_sample_ratio
+        ):
+            return max_exponent
+
+        low = 0.0
+        high = max_exponent
+        for _ in range(14):
+            mid = (low + high) / 2.0
+            if (
+                self._effective_sample_ratio_from_weights(combined(mid))
+                >= self.min_effective_sample_ratio
+            ):
+                low = mid
+            else:
+                high = mid
+        return low
+
     def infer(self):
         # Rewind the Monte-Carlo stream for every public state.  The same state
         # is therefore deterministic, while new observations change the legal
@@ -402,6 +629,7 @@ class HandInferenceEngine:
 
         sampled_hands = []
         log_weights = []
+        residual_log_weights = []
         for _ in range(self.sample_count):
             hands = self._sample_current_hands(hidden_pool, remaining_counts, forced_landlord)
             if hands is None:
@@ -416,12 +644,14 @@ class HandInferenceEngine:
                     factor = self._pass_penalty_for(player, rival_player)
                     log_weight += math.log(max(1e-12, factor))
 
+            residual_log_weight = 0.0
             for (
                 player,
                 action,
                 rival_player,
                 rival_action,
                 future_cards,
+                remaining_before,
             ) in play_contexts:
                 reconstructed = (
                     list(hands[player])
@@ -435,11 +665,51 @@ class HandInferenceEngine:
                 )
                 log_weight += math.log(max(1e-12, factor))
 
+                residual_factor = self._residual_strategy_factor(
+                    reconstructed,
+                    action,
+                    rival_action,
+                    rival_player=rival_player,
+                    remaining_before=remaining_before,
+                )
+                residual_log_weight += math.log(
+                    max(1e-12, residual_factor)
+                )
+
             sampled_hands.append(hands)
             log_weights.append(log_weight)
+            residual_log_weights.append(residual_log_weight)
 
         temperature_used = self._choose_behavior_temperature(log_weights)
-        weights = self._tempered_weights(log_weights, temperature_used)
+        first_stage_weights = self._tempered_weights(
+            log_weights, temperature_used
+        )
+        first_stage_ess_ratio = self._effective_sample_ratio_from_weights(
+            first_stage_weights
+        )
+
+        residual_temperature_used = self._choose_second_stage_temperature(
+            first_stage_weights,
+            residual_log_weights,
+            self.residual_behavior_temperature,
+        )
+        if residual_temperature_used > 0:
+            max_residual = max(residual_log_weights)
+            residual_weights = [
+                math.exp(
+                    (value - max_residual) * residual_temperature_used
+                )
+                for value in residual_log_weights
+            ]
+            weights = [
+                base * extra
+                for base, extra in zip(
+                    first_stage_weights, residual_weights
+                )
+            ]
+        else:
+            weights = first_stage_weights
+
         weighted_samples = list(zip(sampled_hands, weights))
 
         total_weight = sum(w for _, w in weighted_samples)
@@ -539,6 +809,18 @@ class HandInferenceEngine:
             "play_behavior_strength": self.play_behavior_strength,
             "behavior_temperature_configured": self.behavior_temperature,
             "behavior_temperature_used": round(temperature_used, 4),
+            "first_stage_effective_sample_ratio": round(
+                first_stage_ess_ratio, 3
+            ),
+            "residual_behavior_floor": self.residual_behavior_floor,
+            "residual_behavior_strength": self.residual_behavior_strength,
+            "residual_behavior_temperature_configured": (
+                self.residual_behavior_temperature
+            ),
+            "residual_behavior_temperature_used": round(
+                residual_temperature_used, 4
+            ),
+            "residual_evidence_count": len(play_contexts),
             "min_effective_sample_ratio": self.min_effective_sample_ratio,
             "effective_sample_ratio": round(
                 effective_samples / len(weighted_samples), 3
