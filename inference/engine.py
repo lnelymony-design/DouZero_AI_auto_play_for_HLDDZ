@@ -63,11 +63,15 @@ class HandInferenceEngine:
         self.pass_penalty = min(1.0, max(0.05, float(pass_penalty)))
         self.rng = random.Random(random_seed)
         self.history = []
+        self._latest_weighted_samples = []
+        self._latest_total_weight = 0.0
 
         self.opponents = [p for p in POSITIONS if p != self.my_position]
 
     def reset(self):
         self.history = []
+        self._latest_weighted_samples = []
+        self._latest_total_weight = 0.0
 
     def observe(self, player, action):
         """Append one public action.
@@ -209,6 +213,8 @@ class HandInferenceEngine:
 
         total_weight = sum(w for _, w in weighted_samples)
         if total_weight <= 0:
+            self._latest_weighted_samples = []
+            self._latest_total_weight = 0.0
             return {
                 "players": {},
                 "samples": 0,
@@ -218,6 +224,9 @@ class HandInferenceEngine:
 
         sum_sq = sum((w / total_weight) ** 2 for _, w in weighted_samples)
         effective_samples = 1.0 / sum_sq if sum_sq else 0.0
+
+        self._latest_weighted_samples = weighted_samples
+        self._latest_total_weight = total_weight
 
         result = {}
         for player in self.opponents:
@@ -273,6 +282,69 @@ class HandInferenceEngine:
             "effective_samples": round(effective_samples, 1),
             "pass_evidence_count": len(pass_contexts),
             "pass_penalty": self.pass_penalty,
+        }
+
+    def response_risk(self, action, max_samples=320):
+        """Estimate whether an enemy *can* legally beat a proposed action.
+
+        This is a card-power risk, not a calibrated probability that the enemy
+        will actually choose to respond.  For a farmer, only the landlord is an
+        enemy; for the landlord, both farmers are enemies.
+        """
+        if action in (None, "", "Pass", "pass", "PASS"):
+            return None
+
+        cards = str(action)
+        unknown = [c for c in cards if c not in RealCard2EnvCard]
+        if unknown:
+            raise ValueError(f"Unknown card symbols: {unknown}")
+
+        if not self._latest_weighted_samples or self._latest_total_weight <= 0:
+            self.infer()
+
+        samples = self._latest_weighted_samples
+        if not samples:
+            return None
+
+        max_samples = max(50, int(max_samples))
+        if len(samples) > max_samples:
+            step = len(samples) / max_samples
+            selected = [samples[min(len(samples) - 1, int(i * step))]
+                        for i in range(max_samples)]
+        else:
+            selected = samples
+
+        enemies = (
+            [p for p in self.opponents]
+            if self.my_position == "landlord"
+            else ["landlord"]
+        )
+        rival_env = [RealCard2EnvCard[c] for c in cards]
+
+        risk_weight = 0.0
+        total_weight = 0.0
+        for hands, weight in selected:
+            total_weight += weight
+            can_enemy_beat = False
+            for enemy in enemies:
+                hand = hands.get(enemy)
+                if hand is None:
+                    continue
+                hand_env = [RealCard2EnvCard[c] for c in hand]
+                if can_beat(hand_env, rival_env):
+                    can_enemy_beat = True
+                    break
+            if can_enemy_beat:
+                risk_weight += weight
+
+        if total_weight <= 0:
+            return None
+        return risk_weight / total_weight
+
+    def response_risks(self, actions, max_samples=320):
+        return {
+            action: self.response_risk(action, max_samples=max_samples)
+            for action in actions
         }
 
     @staticmethod
