@@ -65,24 +65,90 @@ class ScreenHelper:
         self.WindowWidth = self.config.window_width
         self.WindowHeight = self.config.window_height
         self.ScreenshotAreas = self.config.screenshot_areas
-        self.Handle = win32gui.FindWindow(self.config.window_class_name, None)
+        self.Handle = self._find_target_window()
         self.ScreenZoomRate = None
         self.getZoomRate()
 
     def getZoomRate(self):
         self.ScreenZoomRate = windll.shcore.GetScaleFactorForDevice(0) / 100
+
+    def _find_target_window(self):
+        """Locate the configured game window.
+
+        WeChat miniapp windows use Chromium classes that can change or be shared
+        with other apps, so an exact/partial title match is safer than relying on
+        a hard-coded class name such as UnityWndClass.
+        """
+        target_title = (getattr(self.config, 'window_title', '') or '').strip()
+        target_class = (self.config.window_class_name or '').strip()
+
+        if target_title:
+            exact = win32gui.FindWindow(None, target_title)
+            if exact and win32gui.IsWindow(exact):
+                return exact
+
+            candidates = []
+
+            def enum_callback(hwnd, _):
+                try:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    title = win32gui.GetWindowText(hwnd) or ''
+                    if not title:
+                        return
+                    if title == target_title:
+                        candidates.append((0, hwnd))
+                    elif target_title in title:
+                        candidates.append((1, hwnd))
+                except Exception:
+                    return
+
+            win32gui.EnumWindows(enum_callback, None)
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                return candidates[0][1]
+
+            # When a title is configured, do not fall back to a generic Chromium
+            # class: Edge/Chrome/WeChat can all expose Chrome_WidgetWin_* windows.
+            return 0
+
+        if target_class:
+            hwnd = win32gui.FindWindow(target_class, None)
+            if hwnd and win32gui.IsWindow(hwnd):
+                return hwnd
+
+        return 0
+
+    def get_window_description(self):
+        hwnd = self._find_target_window()
+        if not hwnd:
+            return None
+        return {
+            'handle': hwnd,
+            'title': win32gui.GetWindowText(hwnd),
+            'class_name': win32gui.GetClassName(hwnd),
+        }
     
     def setWindowSize(self):
-        # 查找窗口句柄
-        hwnd = win32gui.FindWindow(self.config.window_class_name, None)
-        if hwnd:
-            # 获取当前窗口位置和大小
-            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        hwnd = self._find_target_window()
+        if not hwnd:
+            print("请确认欢乐斗地主游戏窗口是否打开")
+            return False
 
-            # 设置窗口位置和大小
+        self.Handle = hwnd
+        title = win32gui.GetWindowText(hwnd)
+        class_name = win32gui.GetClassName(hwnd)
+
+        if getattr(self.config, 'resize_window', True):
+            left, top, right, bottom = win32gui.GetWindowRect(hwnd)
             win32gui.MoveWindow(hwnd, left, top, self.WindowWidth, self.WindowHeight, True)
         else:
-            print(f"请确认欢乐斗地主游戏窗口是否打开")
+            left, top, right, bottom = win32gui.GetClientRect(hwnd)
+            self.WindowWidth = right - left
+            self.WindowHeight = bottom - top
+
+        print(f"已连接目标窗口：{title} [{class_name}]")
+        return True
 
     def compute_image_unique_key(self, image):
         image_bytes = image.tobytes()
@@ -102,11 +168,10 @@ class ScreenHelper:
             try:
                 try_count -= 1
                 
-                self.Handle = win32gui.FindWindow(self.config.window_class_name, None)
+                self.Handle = self._find_target_window()
                 if not self.Handle:
                     raise Exception("invalid window handle")
                 
-                win32gui.SetActiveWindow(self.Handle)
                 gameWindow = self.Handle
 
                 left, top, right, bottom = win32gui.GetClientRect(gameWindow)
