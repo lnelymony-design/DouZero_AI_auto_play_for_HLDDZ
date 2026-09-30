@@ -27,12 +27,16 @@ class GameEnvObservedPassTests(unittest.TestCase):
     def test_empty_list_is_explicit_observed_pass(self):
         env, agent = self._env()
 
+        # The landlord must lead with a real play; then the next seat may Pass.
         self.assertEqual(env.acting_player_position, "landlord")
-        env.step("landlord", action=[], update=True)
+        env.step("landlord", action=[3], update=True)
+        self.assertEqual(env.acting_player_position, "landlord_down")
+
+        env.step("landlord_down", action=[], update=True)
 
         self.assertEqual(agent.calls, 0)
-        self.assertEqual(env.card_play_action_seq[-1], ("landlord", []))
-        self.assertEqual(env.acting_player_position, "landlord_down")
+        self.assertEqual(env.card_play_action_seq[-1], ("landlord_down", []))
+        self.assertEqual(env.acting_player_position, "landlord_up")
 
     def test_none_action_requests_model_without_updating(self):
         env, agent = self._env()
