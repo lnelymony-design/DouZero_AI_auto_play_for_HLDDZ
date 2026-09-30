@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 
 from PyQt5.QtCore import pyqtSignal, QThread
@@ -125,6 +126,10 @@ class WorkerThread(QThread):
         self.worker_runing = True
         self.player_bidding_status: dict[int, list[int]] = {}
 
+        if getattr(self.config, 'platform', '') == 'wechat_miniapp':
+            await self.run_wechat_probe()
+            return
+
         while self.worker_runing:
             print()
             print("----- WORKER STARTED -----")
@@ -155,6 +160,51 @@ class WorkerThread(QThread):
             print()
             print("----- WORKER FINISHED -----")
             print()
+
+    async def run_wechat_probe(self):
+        """Read-only first-stage adapter for the WeChat miniapp.
+
+        It verifies title-based window capture and saves one clean client-area
+        screenshot for calibration. QQ-game-hall templates are intentionally not
+        used here because their coordinates/assets do not match the miniapp UI.
+        """
+        print("微信小程序只读适配模式已启动")
+        print("当前阶段：连接游戏窗口并采集标定截图，不会自动点击游戏")
+        print()
+
+        screenshot_saved = False
+        missing_reported = False
+
+        while self.worker_runing:
+            screenshot, _ = await self.screenHelper.getScreenshot()
+
+            if screenshot is None:
+                if not missing_reported:
+                    print("未找到或无法截图‘腾讯欢乐斗地主’窗口，请保持小程序窗口打开")
+                    missing_reported = True
+                await asyncio.sleep(0.5)
+                continue
+
+            missing_reported = False
+
+            if not screenshot_saved:
+                os.makedirs('screenshots', exist_ok=True)
+                calibration_path = os.path.join('screenshots', 'wechat_calibration.png')
+                screenshot.save(calibration_path)
+                description = self.screenHelper.get_window_description() or {}
+                title = description.get('title', '腾讯欢乐斗地主')
+                class_name = description.get('class_name', '-')
+                print(f"已连接微信斗地主窗口：{title} [{class_name}]")
+                print(f"客户区截图尺寸：{screenshot.size[0]} x {screenshot.size[1]}")
+                print(f"标定截图已保存：{calibration_path}")
+                print("等待微信牌面识别适配；可随时点击‘停止’或关闭辅助窗口")
+                print()
+                screenshot_saved = True
+
+            await asyncio.sleep(0.5)
+
+        print("微信小程序只读适配线程已停止")
+        print()
 
     async def before_start(self):
         print('正在检测是否开局...')
