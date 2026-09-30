@@ -47,6 +47,15 @@ def actual_response(events, index, code, final_hands, action):
     return False
 
 
+def actual_response_for_side(events, index, side, final_hands, action):
+    if not action or action == "Pass":
+        return None
+    move = sorted(RealCard2EnvCard[c] for c in action)
+    hand = current_cards(events, index, side, final_hands.get(side, ""))
+    hand_env = sorted(RealCard2EnvCard[c] for c in hand)
+    return can_beat(hand_env, move)
+
+
 def evaluate(
     replay, truth, weights, samples, max_candidates, behavior_mode,
     safer_risk_gains, safer_gap_fractions,
@@ -76,6 +85,7 @@ def evaluate(
         **behavior_kwargs,
     )
     candidates = []
+    side_candidates = []
     decisions = []
 
     for idx, (side, actual) in enumerate(events):
@@ -101,6 +111,31 @@ def evaluate(
                 truth_map[action] = truth_value
                 if risk is not None:
                     candidates.append((float(risk), bool(truth_value)))
+                if profile is not None:
+                    for physical_side in ("left", "right"):
+                        logical_player = player_for_side(
+                            code, physical_side
+                        )
+                        side_profile = (
+                            profile.get("players", {})
+                            .get(logical_player)
+                        )
+                        if side_profile is None:
+                            continue
+                        side_truth = actual_response_for_side(
+                            events,
+                            idx,
+                            physical_side,
+                            truth["final_hands"],
+                            action,
+                        )
+                        side_candidates.append(
+                            (
+                                physical_side,
+                                float(side_profile["can_beat"]),
+                                bool(side_truth),
+                            )
+                        )
 
             raw = triplets[0] if triplets else None
             row = {
@@ -175,7 +210,7 @@ def evaluate(
         if env.game_over:
             break
 
-    return candidates, decisions
+    return candidates, side_candidates, decisions
 
 
 def rate(items):
@@ -215,18 +250,20 @@ def main():
 
     truths = load_truth(args.truth_file)
     all_candidates = []
+    all_side_candidates = []
     all_decisions = []
     for path in args.replays:
         replay = parse_replay(path)
         truth = truths.get(replay["video"])
         if not truth:
             continue
-        cand, dec = evaluate(
+        cand, side_cand, dec = evaluate(
             replay, truth, args.weights, args.samples,
             max(1, args.max_candidates), args.behavior_mode,
             args.safer_risk_gains, args.safer_gap_fractions,
         )
         all_candidates += cand
+        all_side_candidates += side_cand
         all_decisions += dec
         print(
             f"REPLAY {replay['video']}: "
@@ -254,6 +291,27 @@ def main():
                 f"pred={mean(x[0] for x in rows):.1%} "
                 f"actual={mean(float(x[1]) for x in rows):.1%}"
             )
+
+    print("\n=== PHYSICAL-SIDE RESPONSE CALIBRATION ===")
+    for physical_side in ("left", "right"):
+        rows = [
+            (pred, truth)
+            for side, pred, truth in all_side_candidates
+            if side == physical_side
+        ]
+        if not rows:
+            print(f"{physical_side}: no data")
+            continue
+        side_brier = mean(
+            (pred - float(truth)) ** 2
+            for pred, truth in rows
+        )
+        print(
+            f"{physical_side}: n={len(rows)} "
+            f"Brier={side_brier:.4f} "
+            f"pred={mean(pred for pred, _ in rows):.1%} "
+            f"actual={mean(float(truth) for _, truth in rows):.1%}"
+        )
 
     raw = [
         float(row["raw_truth"]) for row in all_decisions
