@@ -10,7 +10,7 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.screenHelper = ScreenHelper()
         self.max_width = 778
-        self.max_height = 480
+        self.max_height = 650
 
         self.setWindowTitle("QQ 游戏大厅 - 欢乐斗地主 AI 辅助")
         self.setGeometry(320, 160, self.max_width, self.max_height)
@@ -24,6 +24,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_card_counter_table()
         self.create_label()
         self.create_other_tables()
+        self.create_inference_table()
         self.create_actions()
 
         self.workerThread = None
@@ -78,6 +79,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.workerThread.bid_win_rate_signal.connect(self.handle_bid_win_rate_update)
             self.workerThread.game_win_rate_signal.connect(self.handle_game_win_rate_update)
             self.workerThread.played_card_signal.connect(self.handle_played_card_update)
+            self.workerThread.hand_inference_signal.connect(self.handle_hand_inference_update)
 
         if not self.workerThread.isRunning():
             self.workerThread.start()
@@ -258,6 +260,125 @@ class MainWindow(QtWidgets.QMainWindow):
             self.playedCardsTable.setItem(2, 1, playedCardRightItem)
         elif result[0] == 'landlord_down':
             self.playedCardsTable.setItem(3, 1, playedCardRightItem)
+
+    def create_inference_table(self):
+        title_layout = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel("对手剩余手牌概率（推断）")
+        title.setFont(QtGui.QFont("微软雅黑", 9, QtGui.QFont.Bold))
+        title_layout.addWidget(title)
+        title_layout.addStretch()
+
+        self.inferenceMetaLabel = QtWidgets.QLabel("样本：-  有效：-  Pass证据：-")
+        self.inferenceMetaLabel.setFont(QtGui.QFont("微软雅黑", 8))
+        title_layout.addWidget(self.inferenceMetaLabel)
+        self.main_layout.addLayout(title_layout)
+
+        self.inferenceTable = QtWidgets.QTableWidget(self)
+        self.inferenceTable.setRowCount(4)
+        self.inferenceTable.setColumnCount(8)
+        self.inferenceTable.verticalHeader().setVisible(False)
+        self.inferenceTable.horizontalHeader().setVisible(False)
+        self.inferenceTable.setShowGrid(False)
+        self.inferenceTable.setFixedHeight(128)
+        self.inferenceTable.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.inferenceTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.inferenceTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.inferenceTable.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+
+        headers = ["玩家", "剩余", "大王", "小王", "2", "A", "炸弹", "王炸"]
+        widths = [130, 65, 85, 85, 85, 85, 100, 100]
+        for col, (header, width) in enumerate(zip(headers, widths)):
+            self.inferenceTable.setColumnWidth(col, width)
+            item = QtWidgets.QTableWidgetItem(header)
+            item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.inferenceTable.setItem(0, col, item)
+
+        position_names = [
+            ("landlord_up", "地主上家"),
+            ("landlord", "地主"),
+            ("landlord_down", "地主下家"),
+        ]
+        for row, (_, name) in enumerate(position_names, start=1):
+            self.inferenceTable.setRowHeight(row, 30)
+            name_item = QtWidgets.QTableWidgetItem(name)
+            name_item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            name_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.inferenceTable.setItem(row, 0, name_item)
+            for col in range(1, 8):
+                item = QtWidgets.QTableWidgetItem("-")
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.inferenceTable.setItem(row, col, item)
+
+        self.main_layout.addWidget(self.inferenceTable)
+
+    def handle_hand_inference_update(self, result):
+        position_rows = {
+            "landlord_up": 1,
+            "landlord": 2,
+            "landlord_down": 3,
+        }
+
+        if not result or not result.get("players"):
+            self.inferenceMetaLabel.setText("样本：-  有效：-  Pass证据：-")
+            for row in range(1, 4):
+                for col in range(1, 8):
+                    item = QtWidgets.QTableWidgetItem("-")
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    self.inferenceTable.setItem(row, col, item)
+            return
+
+        self.inferenceMetaLabel.setText(
+            f"样本：{result.get('samples', '-')}  "
+            f"有效：{result.get('effective_samples', '-')}  "
+            f"Pass证据：{result.get('pass_evidence_count', 0)}"
+        )
+
+        for row in range(1, 4):
+            for col in range(1, 8):
+                item = QtWidgets.QTableWidgetItem("-")
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.inferenceTable.setItem(row, col, item)
+
+        for position, data in result["players"].items():
+            row = position_rows.get(position)
+            if row is None:
+                continue
+
+            values = [
+                str(data.get("remaining_count", "-")),
+                self._format_inference_probability(data, "D"),
+                self._format_inference_probability(data, "X"),
+                self._format_inference_probability(data, "2"),
+                self._format_inference_probability(data, "A"),
+                f"{data.get('any_bomb', 0):.0%}",
+                f"{data.get('rocket', 0):.0%}",
+            ]
+
+            for col, value in enumerate(values, start=1):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                if col >= 2 and value.endswith("%"):
+                    try:
+                        p = float(value[:-1]) / 100.0
+                        if p >= 0.75:
+                            item.setForeground(QtGui.QColor("#ff0000"))
+                        elif p >= 0.5:
+                            item.setForeground(QtGui.QColor("#0000FF"))
+                    except ValueError:
+                        pass
+                self.inferenceTable.setItem(row, col, item)
+
+    @staticmethod
+    def _format_inference_probability(player_data, card):
+        probability = (
+            player_data.get("cards", {})
+            .get(card, {})
+            .get("one_plus", 0)
+        )
+        return f"{probability:.0%}"
 
     def create_comboBox(self):
         combo_layout = QtWidgets.QHBoxLayout()
