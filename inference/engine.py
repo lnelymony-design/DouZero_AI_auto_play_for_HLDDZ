@@ -432,6 +432,7 @@ class HandInferenceEngine:
         action,
         rival_action,
         rival_player=None,
+        acting_player=None,
         remaining_before=None,
     ):
         """Second likelihood weight based on the hand left after the play.
@@ -480,7 +481,8 @@ class HandInferenceEngine:
             if (
                 rival_left is not None
                 and rival_left <= 2
-                and not self._same_team(rival_player, self.my_position)
+                and acting_player is not None
+                and not self._same_team(rival_player, acting_player)
             ):
                 emergency = True
 
@@ -670,6 +672,7 @@ class HandInferenceEngine:
                     action,
                     rival_action,
                     rival_player=rival_player,
+                    acting_player=player,
                     remaining_before=remaining_before,
                 )
                 residual_log_weight += math.log(
@@ -827,6 +830,55 @@ class HandInferenceEngine:
             ) if weighted_samples else 0.0,
             "behavior_model": "heuristic_v2_tempered",
         }
+
+    def posterior_worlds(self, max_worlds=24):
+        """Return deterministic weighted opponent-hand worlds for rollout.
+
+        The returned probabilities sum to one across the selected worlds.
+        Selection is stratified over posterior mass rather than taking only the
+        highest-weight particles, which keeps lower-probability plausible worlds
+        represented in downstream simulation.
+        """
+        if not self._latest_weighted_samples or self._latest_total_weight <= 0:
+            self.infer()
+
+        samples = self._latest_weighted_samples
+        total = self._latest_total_weight
+        if not samples or total <= 0:
+            return []
+
+        max_worlds = max(1, min(int(max_worlds), len(samples)))
+        cumulative = []
+        running = 0.0
+        for hands, weight in samples:
+            running += weight / total
+            cumulative.append((running, hands, weight / total))
+
+        selected = []
+        used = set()
+        for i in range(max_worlds):
+            target = (i + 0.5) / max_worlds
+            for idx, (mass, hands, prob) in enumerate(cumulative):
+                if mass >= target:
+                    if idx not in used:
+                        used.add(idx)
+                        selected.append((hands, prob))
+                    break
+
+        if not selected:
+            return []
+
+        selected_total = sum(prob for _, prob in selected)
+        return [
+            {
+                "hands": {
+                    player: _sorted_cards(cards)
+                    for player, cards in hands.items()
+                },
+                "probability": prob / selected_total,
+            }
+            for hands, prob in selected
+        ]
 
     def response_profile(self, action, max_samples=320):
         """Describe how each opponent and the enemy side can answer an action.
