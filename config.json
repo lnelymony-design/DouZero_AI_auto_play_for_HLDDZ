@@ -58,7 +58,11 @@
     "inference_play_behavior_strength": 1,
     "inference_behavior_temperature": 0.75,
     "inference_min_effective_sample_ratio": 0.28,
-    "risk_adjustment_enabled": false,
+    "risk_adjustment_enabled": true,
     "risk_adjustment_weight": 0.45,
-    "risk_adjustment_min_ess_ratio": 0.4
+    "risk_adjustment_min_ess_ratio": 0.45,
+    "risk_adjustment_min_risk_gain": 0.25,
+    "risk_adjustment_max_model_gap_fraction": 0.25,
+    "risk_adjustment_max_model_rank": 3,
+    "risk_adjustment_response_samples": 240
 }
