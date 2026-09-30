@@ -424,13 +424,16 @@ class WechatCardRecognizer:
         return self._merge_cards(normal, jokers)
 
     def recognize_left_played(self, image):
-        return self._recognize_played_region(image, (0.13, 0.43, 0.285, 0.37))
+        # Long combinations can extend toward the centre and lower than singles.
+        return self._recognize_played_region(image, (0.08, 0.50, 0.25, 0.55))
 
     def recognize_right_played(self, image):
-        return self._recognize_played_region(image, (0.62, 0.89, 0.285, 0.37))
+        # The recordings include a 10-card right-side play (AKQJ1098765);
+        # the old narrow crop missed it completely.
+        return self._recognize_played_region(image, (0.50, 0.92, 0.25, 0.58))
 
     def recognize_my_played(self, image):
-        return self._recognize_played_region(image, (0.42, 0.60, 0.44, 0.58))
+        return self._recognize_played_region(image, (0.32, 0.68, 0.38, 0.62))
 
     def _recognize_played_region(self, image, region):
         bgr = self._to_bgr(image)
