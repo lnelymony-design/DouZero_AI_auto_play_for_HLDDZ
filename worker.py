@@ -201,6 +201,8 @@ class WorkerThread(QThread):
         confirmed_my_hand = None
         landlord_debug_saved = False
         init_wait_last_count = None
+        pre_landlord_hand = None
+        preinit_counts = {"left": None, "right": None}
 
         def display_cards(cards):
             if not cards:
@@ -262,7 +264,7 @@ class WorkerThread(QThread):
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal wechat_other_hands_cards_str, confirmed_my_hand
-            nonlocal init_wait_last_count
+            nonlocal init_wait_last_count, pre_landlord_hand
 
             self.my_hand_cards = my_hand
             self.three_cards = three_cards
@@ -279,7 +281,11 @@ class WorkerThread(QThread):
             landlord_side = landlord_start_side[position_code]
             for side in ("left", "right"):
                 tracked_remaining[side] = 20 if side == landlord_side else 17
-                observed_remaining[side] = None
+                observed_remaining[side] = (
+                    preinit_counts[side]
+                    if preinit_counts[side] == tracked_remaining[side]
+                    else None
+                )
                 count_desync[side] = False
             emit_remaining_counts()
 
@@ -340,10 +346,35 @@ class WorkerThread(QThread):
                 screenshot_saved = True
 
             try:
+                # Collect independent role evidence before initialization.
                 landlord_side = recognizer.detect_landlord_side(screenshot)
                 position_map = {"right": 0, "me": 1, "left": 2}
+                badge_position = stable_value(
+                    "badge_position_code", position_map.get(landlord_side), frames=3
+                )
+
+                my_hand_raw = recognizer.recognize_my_hand(screenshot)
+                my_hand = stable_value("my_hand", my_hand_raw, frames=5)
+
+                if not round_initialized:
+                    for side in ("left", "right"):
+                        raw_count = recognizer.recognize_remaining_count(
+                            screenshot, side, expected=None
+                        )
+                        preinit_counts[side] = stable_value(
+                            f"preinit_{side}_count", raw_count, frames=4
+                        )
+
+                inferred_position = badge_position
+                if my_hand is not None and len(my_hand) == 20:
+                    inferred_position = 1
+                elif preinit_counts["left"] == 20:
+                    inferred_position = 2
+                elif preinit_counts["right"] == 20:
+                    inferred_position = 0
+
                 position_code = stable_value(
-                    "position_code", position_map.get(landlord_side)
+                    "position_code", inferred_position, frames=3
                 )
                 if (
                     position_code is not None
@@ -354,17 +385,23 @@ class WorkerThread(QThread):
                         1: "地主",
                         2: "农民（地主下家）",
                     }[position_code]
-                    print(f"微信专用识牌 >>> 我的身份: {position_text}")
+                    evidence = (
+                        "20张手牌" if position_code == 1 and my_hand and len(my_hand) == 20
+                        else "左侧20张" if position_code == 2 and preinit_counts["left"] == 20
+                        else "右侧20张" if position_code == 0 and preinit_counts["right"] == 20
+                        else "地主标志"
+                    )
+                    print(f"微信专用识牌 >>> 我的身份: {position_text} [{evidence}]")
                     last_state["position_code"] = position_code
-
-                role_is_landlord = (
-                    last_state["position_code"] == 1 or landlord_side == "me"
-                )
-                my_hand_raw = recognizer.recognize_my_hand(
-                    screenshot, is_landlord=role_is_landlord
-                )
-                my_hand = stable_value("my_hand", my_hand_raw, frames=5)
                 pending_my_action = None
+                if (
+                    not round_initialized
+                    and my_hand is not None
+                    and len(my_hand) == 17
+                    and last_state["position_code"] != 1
+                ):
+                    pre_landlord_hand = my_hand
+
                 if my_hand is not None and my_hand:
                     expected_preinit_count = (
                         20 if last_state["position_code"] == 1 else 17
@@ -401,11 +438,28 @@ class WorkerThread(QThread):
 
                 three_raw = recognizer.recognize_bottom_cards(screenshot)
                 three_cards = stable_value("three_cards", three_raw)
+
+                if (
+                    last_state["position_code"] == 1
+                    and my_hand is not None
+                    and len(my_hand) == 20
+                    and pre_landlord_hand is not None
+                    and len(pre_landlord_hand) == 17
+                ):
+                    added = hand_difference(my_hand, pre_landlord_hand)
+                    # hand_difference(before, after) returns before-after.
+                    if added is not None and len(added) == 3:
+                        three_cards = added
+
                 if three_cards is not None and len(three_cards) == 3:
                     if three_cards != last_state["three_cards"]:
+                        source = " [17→20手牌差分]" if (
+                            last_state["position_code"] == 1
+                            and pre_landlord_hand is not None
+                        ) else ""
                         print(
                             f"微信专用识牌 >>> 三张底牌: "
-                            f"{display_cards(three_cards)}"
+                            f"{display_cards(three_cards)}{source}"
                         )
                         last_state["three_cards"] = three_cards
                         self.three_cards_signal.emit(three_cards)
