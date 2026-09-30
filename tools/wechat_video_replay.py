@@ -28,6 +28,8 @@ from pathlib import Path
 import cv2
 
 from helpers.WechatCardRecognizer import WechatCardRecognizer
+from constants import RealCard2EnvCard
+from douzero.env.move_detector import get_move_type
 
 
 POSITIONS = ("landlord_up", "landlord", "landlord_down")
@@ -62,6 +64,16 @@ def hand_difference(before: str, after: str):
             result.append(card)
             missing[card] -= 1
     return "".join(result)
+
+
+def is_legal_play(cards: str):
+    if not cards:
+        return False
+    try:
+        env_cards = sorted(RealCard2EnvCard[card] for card in cards)
+        return get_move_type(env_cards).get("type") != 15
+    except Exception:
+        return False
 
 
 def display(cards: str):
@@ -279,8 +291,12 @@ def replay(path: str, sample_seconds=0.35):
         local_final_out = False
         if live_hand and confirmed_my_hand and live_hand != confirmed_my_hand:
             removed = hand_difference(confirmed_my_hand, live_hand)
-            if removed:
+            if removed and is_legal_play(removed):
                 local_action = removed
+            elif removed:
+                result.issues.append(
+                    f"{t:.1f}s illegal local hand-delta candidate {removed}"
+                )
             elif removed == "":
                 confirmed_my_hand = live_hand
 
@@ -292,7 +308,11 @@ def replay(path: str, sample_seconds=0.35):
             final_cards = recognizer.recognize_my_played(
                 frame, expected_count=len(confirmed_my_hand)
             )
-            if final_cards and len(final_cards) == len(confirmed_my_hand):
+            if (
+                final_cards
+                and len(final_cards) == len(confirmed_my_hand)
+                and is_legal_play(final_cards)
+            ):
                 local_action = final_cards
                 local_final_out = True
 
@@ -342,7 +362,7 @@ def replay(path: str, sample_seconds=0.35):
                     else recognizer.recognize_right_played(frame, expected_count=drop)
                 )
 
-            if cards and len(cards) == drop:
+            if cards and len(cards) == drop and is_legal_play(cards):
                 if sync_to_actor(t, side, counts, raw_hand):
                     add_action(t, side, cards, source, target_count)
                     tracked[side] = target_count
