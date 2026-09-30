@@ -65,6 +65,19 @@ class HandInferenceEngineTests(unittest.TestCase):
         self.assertEqual(engine.response_risk("DX", max_samples=100), 0.0)
         self.assertIsNone(engine.response_risk("Pass", max_samples=100))
 
+    def test_repeated_inference_is_stable_for_same_public_state(self):
+        engine = HandInferenceEngine(
+            my_position="landlord_up",
+            my_hand_cards="33445566778899TJQ",
+            three_landlord_cards="D2A",
+            sample_count=240,
+        )
+        first = engine.infer()
+        second = engine.infer()
+
+        self.assertEqual(first["players"], second["players"])
+        self.assertEqual(first["effective_samples"], second["effective_samples"])
+
 
 if __name__ == "__main__":
     unittest.main()
