@@ -19,12 +19,13 @@ from models import FarmerModel
 from models import LandlordModel
 
 from douzero.env.game_new import GameEnv
-from douzero.env.move_detector import get_move_type
+from douzero.env.move_detector import get_move_type, TYPE_4_BOMB, TYPE_5_KING_BOMB
 from douzero.evaluation.deep_agent_new import DeepAgent
 
 from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticModeEnum
 from utils import remove_chars_from_string
 from inference import HandInferenceEngine
+from inference.decision_policy import choose_recommendation
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -330,27 +331,83 @@ class WorkerThread(QThread):
                 )
                 self.action_message = action_message
 
+                if not action_list:
+                    self.action_list = []
+                    self.ai_suggestion_signal.emit([])
+                    douzero_paused_reason = None
+                    return
+
                 inference_result = self.last_hand_inference_result or {}
-                ess_ratio = inference_result.get("effective_sample_ratio", 0.0)
-                top_actions = action_list[:3]
-                enriched_actions = []
-                audit_candidates = []
+                ess_ratio = float(
+                    inference_result.get("effective_sample_ratio", 0.0) or 0.0
+                )
+                raw_actions = list(action_list)
+                raw_model_rank = {
+                    action: rank
+                    for rank, (action, _) in enumerate(raw_actions, start=1)
+                }
+                raw_top_action, raw_top_score = raw_actions[0]
+
+                # game_new may deliberately replace the raw network top action
+                # with a deterministic direct-finish / finish-path action.  The
+                # old WeChat display discarded that choice by rebuilding the UI
+                # from action_list alone.  Preserve it before belief reranking.
+                env_selected_action = ""
+                env_selected_win_rate = 0.0
+                if isinstance(action_message, dict):
+                    env_selected_action = str(
+                        action_message.get("action", "") or "Pass"
+                    )
+                    try:
+                        env_selected_win_rate = float(
+                            action_message.get("win_rate", 0.0) or 0.0
+                        )
+                    except (TypeError, ValueError):
+                        env_selected_win_rate = 0.0
+
+                env_override = False
+                env_selected_rank = raw_model_rank.get(env_selected_action)
+                if (
+                    env_selected_action
+                    and env_selected_action != raw_top_action
+                    and env_selected_rank is not None
+                    and abs(env_selected_win_rate) >= 1000.0
+                ):
+                    env_override = True
+                    print(
+                        "建议链路 >>> game_new确定性路径优先: "
+                        f"{display_cards(env_selected_action) if env_selected_action != 'Pass' else '不出'} "
+                        f"(原模型第{env_selected_rank})"
+                    )
+
+                display_pairs = raw_actions[:3]
+                if env_override:
+                    selected_pair = raw_actions[env_selected_rank - 1]
+                    display_pairs = [selected_pair] + [
+                        item
+                        for item in raw_actions
+                        if item[0] != env_selected_action
+                    ][:2]
 
                 left_player = player_for_side("left")
                 right_player = player_for_side("right")
+                profile_by_action = {}
+                enriched_by_action = {}
+                audit_candidates = []
 
-                for model_rank, (action_text, score_text) in enumerate(
-                    top_actions, start=1
-                ):
+                for action_text, score_text in display_pairs:
+                    model_rank = raw_model_rank.get(action_text, 999)
                     profile = None
                     if self.hand_inference is not None and action_text != "Pass":
                         try:
                             profile = self.hand_inference.response_profile(
-                                action_text
+                                action_text,
+                                max_samples=self.config.risk_adjustment_response_samples,
                             )
                         except Exception as risk_exc:
                             print(f"敌方响应结构计算失败: {risk_exc}")
 
+                    profile_by_action[action_text] = profile
                     total_text = (
                         "-" if profile is None
                         else f"{profile['can_beat']:.0%}"
@@ -378,22 +435,25 @@ class WorkerThread(QThread):
                     )
                     right_bomb_text = split_text(right_profile, "bomb_only")
 
-                    enriched_actions.append(
-                        (
-                            action_text,
-                            score_text,
-                            total_text,
-                            left_ordinary_text,
-                            left_bomb_text,
-                            right_ordinary_text,
-                            right_bomb_text,
-                            model_rank,
-                        )
+                    enriched = (
+                        action_text,
+                        score_text,
+                        total_text,
+                        left_ordinary_text,
+                        left_bomb_text,
+                        right_ordinary_text,
+                        right_bomb_text,
+                        model_rank,
                     )
+                    enriched_by_action[action_text] = enriched
                     audit_candidates.append({
                         "action": action_text,
                         "model_rank": model_rank,
                         "model_score": float(score_text),
+                        "response_pressure": (
+                            None if profile is None
+                            else profile.get("pressure")
+                        ),
                         "response_profile": profile,
                         "physical_sides": {
                             "left": {
@@ -407,11 +467,120 @@ class WorkerThread(QThread):
                         },
                     })
 
-                self.action_list = enriched_actions
+                # Reranking uses posterior pressure rather than can_beat:
+                # ordinary answers count fully, while a bomb-only answer is
+                # discounted by the inference engine.  It remains a relative
+                # safety signal, never a claimed win probability.
+                policy_candidates = []
+                for action_text, score_text in raw_actions[:3]:
+                    profile = profile_by_action.get(action_text)
+                    if profile is None and action_text != "Pass":
+                        try:
+                            profile = self.hand_inference.response_profile(
+                                action_text,
+                                max_samples=self.config.risk_adjustment_response_samples,
+                            ) if self.hand_inference is not None else None
+                        except Exception as risk_exc:
+                            print(f"候选压力计算失败: {risk_exc}")
+                            profile = None
+                        profile_by_action[action_text] = profile
+                    pressure = (
+                        None if profile is None
+                        else profile.get("pressure")
+                    )
+                    policy_candidates.append(
+                        (action_text, float(score_text), pressure)
+                    )
+
+                def action_is_bomb(action_text):
+                    if action_text in (None, "", "Pass"):
+                        return False
+                    try:
+                        action_env = [
+                            RealCard2EnvCard[card]
+                            for card in str(action_text)
+                        ]
+                        move_type = get_move_type(action_env).get("type")
+                        return move_type in (
+                            TYPE_4_BOMB,
+                            TYPE_5_KING_BOMB,
+                        )
+                    except Exception:
+                        return False
+
+                decision = choose_recommendation(
+                    policy_candidates,
+                    ess_ratio=ess_ratio,
+                    enabled=self.config.risk_adjustment_enabled,
+                    min_ess_ratio=self.config.risk_adjustment_min_ess_ratio,
+                    min_risk_gain=self.config.risk_adjustment_min_risk_gain,
+                    max_model_gap_fraction=(
+                        self.config.risk_adjustment_max_model_gap_fraction
+                    ),
+                    max_model_rank=self.config.risk_adjustment_max_model_rank,
+                    locked_action=(
+                        env_selected_action if env_override else None
+                    ),
+                    locked_model_rank=env_selected_rank,
+                    is_bomb_action=action_is_bomb,
+                )
+
+                final_action = (
+                    decision.action if decision is not None
+                    else raw_top_action
+                )
+
+                # Ensure the final action is present in the display set.
+                if final_action not in enriched_by_action:
+                    for action_text, score_text in raw_actions:
+                        if action_text != final_action:
+                            continue
+                        profile = profile_by_action.get(action_text)
+                        total_text = (
+                            "-" if profile is None
+                            else f"{profile['can_beat']:.0%}"
+                        )
+                        player_profiles = (
+                            {} if profile is None
+                            else profile.get("players", {})
+                        )
+                        left_profile = player_profiles.get(left_player)
+                        right_profile = player_profiles.get(right_player)
+
+                        def split_text_late(side_profile, key):
+                            return (
+                                "-"
+                                if side_profile is None
+                                else f"{side_profile[key]:.0%}"
+                            )
+
+                        enriched_by_action[action_text] = (
+                            action_text,
+                            score_text,
+                            total_text,
+                            split_text_late(left_profile, "ordinary_beat"),
+                            split_text_late(left_profile, "bomb_only"),
+                            split_text_late(right_profile, "ordinary_beat"),
+                            split_text_late(right_profile, "bomb_only"),
+                            raw_model_rank.get(action_text, 999),
+                        )
+                        break
+
+                ordered = []
+                if final_action in enriched_by_action:
+                    ordered.append(enriched_by_action[final_action])
+                for action_text, _ in display_pairs:
+                    if action_text == final_action:
+                        continue
+                    item = enriched_by_action.get(action_text)
+                    if item is not None:
+                        ordered.append(item)
+                self.action_list = ordered[:3]
                 self.ai_suggestion_signal.emit(self.action_list)
                 douzero_paused_reason = None
 
-                if enriched_actions:
+                final_profile = profile_by_action.get(final_action)
+                if self.action_list:
                     (
                         action_text,
                         score_text,
@@ -420,44 +589,94 @@ class WorkerThread(QThread):
                         left_bomb_text,
                         right_ordinary_text,
                         right_bomb_text,
-                        _,
-                    ) = enriched_actions[0]
+                        model_rank,
+                    ) = self.action_list[0]
                     shown = (
                         "不出"
                         if action_text == "Pass"
                         else display_cards(action_text)
                     )
+                    source_text = {
+                        "env_override": "直接出完/路径",
+                        "belief_safer": "推牌风险修正",
+                        "douzero": "DouZero",
+                    }.get(
+                        decision.source if decision is not None else "douzero",
+                        "DouZero",
+                    )
                     print(
-                        f"DouZero建议 >>> {shown} "
+                        f"综合建议 >>> {shown} "
+                        f"[来源 {source_text}；原模型#{model_rank}] "
                         f"(模型分 {score_text}，敌方总可压 {total_text}；"
                         f"左 普{left_ordinary_text}/炸{left_bomb_text}；"
                         f"右 普{right_ordinary_text}/炸{right_bomb_text})"
                     )
+                    if (
+                        decision is not None
+                        and decision.source == "belief_safer"
+                    ):
+                        print(
+                            "推牌修正 >>> "
+                            f"压力下降 {decision.risk_gain:.0%}，"
+                            f"模型差距占候选跨度 "
+                            f"{decision.model_gap_fraction:.0%}"
+                        )
 
-                if top_actions:
-                    raw_action, raw_score = top_actions[0]
-                    raw_profile = (
-                        audit_candidates[0]["response_profile"]
-                        if audit_candidates else None
-                    )
-                    suggestion_audit.append({
-                        "timestamp": datetime.now().isoformat(timespec="seconds"),
-                        "history_length": len(douzero_history),
-                        "ess_ratio": ess_ratio,
-                        "risk_adjustment_enabled": False,
-                        "raw_top": {
-                            "action": raw_action,
-                            "model_score": float(raw_score),
-                            "response_risk": (
-                                None if raw_profile is None
-                                else raw_profile["can_beat"]
-                            ),
-                            "response_profile": raw_profile,
-                        },
-                        "adjusted_top": None,
-                        "changed_top_action": False,
-                        "candidates": audit_candidates,
-                    })
+                raw_profile = profile_by_action.get(raw_top_action)
+                suggestion_audit.append({
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "history_length": len(douzero_history),
+                    "ess_ratio": ess_ratio,
+                    "risk_adjustment_enabled": bool(
+                        self.config.risk_adjustment_enabled
+                    ),
+                    "risk_adjustment_applied": bool(
+                        decision is not None
+                        and decision.source == "belief_safer"
+                    ),
+                    "decision_source": (
+                        decision.source if decision is not None else "douzero"
+                    ),
+                    "decision_reason": (
+                        decision.reason if decision is not None else ""
+                    ),
+                    "env_selected": {
+                        "action": env_selected_action,
+                        "win_rate_marker": env_selected_win_rate,
+                        "model_rank": env_selected_rank,
+                        "override_applied": env_override,
+                    },
+                    "raw_top": {
+                        "action": raw_top_action,
+                        "model_score": float(raw_top_score),
+                        "response_risk": (
+                            None if raw_profile is None
+                            else raw_profile.get("can_beat")
+                        ),
+                        "response_pressure": (
+                            None if raw_profile is None
+                            else raw_profile.get("pressure")
+                        ),
+                        "response_profile": raw_profile,
+                    },
+                    "adjusted_top": {
+                        "action": final_action,
+                        "model_rank": raw_model_rank.get(final_action),
+                        "response_risk": (
+                            None if final_profile is None
+                            else final_profile.get("can_beat")
+                        ),
+                        "response_pressure": (
+                            None if final_profile is None
+                            else final_profile.get("pressure")
+                        ),
+                    },
+                    "changed_top_action": final_action != raw_top_action,
+                    "candidates": sorted(
+                        audit_candidates,
+                        key=lambda item: item["model_rank"],
+                    ),
+                })
             except Exception as exc:
                 pause_douzero(f"建议计算失败：{exc}")
 
