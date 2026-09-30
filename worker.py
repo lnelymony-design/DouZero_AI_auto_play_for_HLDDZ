@@ -1,5 +1,9 @@
 import asyncio
+import json
+import os
 import time
+from collections import Counter
+from datetime import datetime
 
 from PyQt5.QtCore import pyqtSignal, QThread
 
@@ -8,6 +12,7 @@ from config import Config
 from helpers.GameHelper import GameHelper, AnimationArea
 from helpers.ImageLocator import ImageLocator
 from helpers.ScreenHelper import ScreenHelper
+from helpers.WechatCardRecognizer import WechatCardRecognizer
 
 from models import BidModel
 from models import FarmerModel
@@ -19,6 +24,7 @@ from douzero.evaluation.deep_agent_new import DeepAgent
 
 from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticModeEnum
 from utils import remove_chars_from_string
+from inference import HandInferenceEngine
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -31,6 +37,8 @@ class WorkerThread(QThread):
     bid_win_rate_signal = pyqtSignal(list)
     game_win_rate_signal = pyqtSignal(float)
     played_card_signal = pyqtSignal(list)
+    hand_inference_signal = pyqtSignal(dict)
+    remaining_count_signal = pyqtSignal(dict)
 
     def __init__(self, automatic_mode, bid_threshold, redouble_threshold, super_redouble_threshold, mingpai_threshold):
         super(WorkerThread, self).__init__()
@@ -38,6 +46,7 @@ class WorkerThread(QThread):
         self.screenHelper = ScreenHelper()
         self.imageLocator = ImageLocator(self.screenHelper)
         self.gameHelper = GameHelper(self.imageLocator, self.screenHelper)
+        self.wechatRecognizer = WechatCardRecognizer() if getattr(self.config, 'platform', '') == 'wechat_miniapp' else None
         
         self.bid_threshold = bid_threshold if bid_threshold else self.config.bid_threshold
         self.redouble_threshold = redouble_threshold if redouble_threshold else self.config.redouble_threshold
@@ -97,6 +106,10 @@ class WorkerThread(QThread):
         self.action_message = None
         self.action_list = None
 
+        # 概率推牌器：利用已知手牌、底牌、出牌和 Pass 动作推测两家剩余手牌。
+        self.hand_inference = None
+        self.last_hand_inference_result = None
+
         self.try_num = 3
         self.round_count = 0
 
@@ -119,6 +132,10 @@ class WorkerThread(QThread):
     async def run_task(self):
         self.worker_runing = True
         self.player_bidding_status: dict[int, list[int]] = {}
+
+        if getattr(self.config, 'platform', '') == 'wechat_miniapp':
+            await self.run_wechat_probe()
+            return
 
         while self.worker_runing:
             print()
@@ -150,6 +167,1272 @@ class WorkerThread(QThread):
             print()
             print("----- WORKER FINISHED -----")
             print()
+
+    async def run_wechat_probe(self):
+        """Run the WeChat miniapp as a read-only live state/inference pipeline.
+
+        The three user-recorded games are used as calibration evidence:
+        - hand changes are authoritative for the local player;
+        - opponent remaining-count drops trigger opponent plays;
+        - the visible play must contain exactly the number of cards that left
+          the opponent's hand before the action is committed;
+        - if a later confirmed actor appears, skipped seats are logically Pass.
+        """
+        print("微信小程序牌局接入模式已启动")
+        print("三盘录像标定版：手牌差分 + 剩余张数触发 + 出牌张数交叉校验")
+        print("当前仍为只读模式，不会自动点击游戏")
+        print()
+
+        recognizer = self.wechatRecognizer or WechatCardRecognizer()
+        screenshot_saved = False
+        missing_reported = False
+        pending = {}
+
+        round_initialized = False
+        round_signature = None
+        expected_side = None
+        confirmed_my_hand = None
+        pre_landlord_hand = None
+        preinit_counts = {"left": None, "right": None}
+        tracked_remaining = {"left": None, "right": None}
+        observed_remaining = {"left": None, "right": None}
+        count_desync = {"left": False, "right": False}
+        recent_play = {
+            "left": {"cards": "", "time": 0.0},
+            "right": {"cards": "", "time": 0.0},
+        }
+        recent_self_plays = []
+        count_missing_frames = {"left": 0, "right": 0}
+        self_hand_missing_frames = 0
+        pass_latched = {"left": False, "right": False, "me": False}
+        last_state = {
+            "three_cards": None,
+            "position_code": None,
+        }
+        wechat_other_hands_cards_str = ""
+        douzero_initial_data = None
+        douzero_players = None
+        douzero_history = []
+        douzero_paused_reason = None
+        suggestion_audit = []
+        pending_round_audit = None
+        last_init_diag_signature = None
+        last_init_diag_time = 0.0
+        scene_blank_frames = 0
+        round_boundary_seen = False
+        midgame_wait_announced = False
+
+        side_cycle = {"me": "right", "right": "left", "left": "me"}
+        landlord_start_side = {0: "right", 1: "me", 2: "left"}
+
+        def display_cards(cards):
+            if not cards:
+                return "-"
+            display_map = {"D": "大王", "X": "小王", "T": "10"}
+            return " ".join(display_map.get(card, card) for card in cards)
+
+        def is_legal_play(cards):
+            if not cards:
+                return False
+            try:
+                env_cards = sorted([RealCard2EnvCard[card] for card in cards])
+                return get_move_type(env_cards).get("type") != 15
+            except Exception:
+                return False
+
+        def hand_difference(before, after):
+            """Return cards removed from before to after; None if after is impossible."""
+            before_counter = Counter(before)
+            after_counter = Counter(after)
+            if any(after_counter[card] > before_counter[card] for card in after_counter):
+                return None
+
+            missing = before_counter - after_counter
+            result = []
+            for card in before:
+                if missing[card] > 0:
+                    result.append(card)
+                    missing[card] -= 1
+            return "".join(result)
+
+        def stable_value(key, value, frames=2):
+            previous, count = pending.get(key, (None, 0))
+            if value == previous:
+                count += 1
+            else:
+                previous, count = value, 1
+            pending[key] = (previous, count)
+            return value if count >= frames else None
+
+        def player_for_side(side):
+            if self.my_position_code is None:
+                return None
+            if side == "me":
+                return self.my_position
+            if side == "right":
+                return PlayerPosition[(self.my_position_code + 1) % 3]
+            if side == "left":
+                return PlayerPosition[(self.my_position_code + 2) % 3]
+            return None
+
+        def emit_remaining_counts():
+            result = {}
+            for side in ("left", "right"):
+                player = player_for_side(side)
+                value = observed_remaining[side]
+                if value is None:
+                    value = tracked_remaining[side]
+                if player is not None and value is not None:
+                    result[player] = {
+                        "count": int(value),
+                        "observed": observed_remaining[side] is not None,
+                        "desync": bool(count_desync[side]),
+                    }
+            if result:
+                self.remaining_count_signal.emit(result)
+
+        def record_pass(side, inferred=False):
+            nonlocal expected_side
+            player = player_for_side(side)
+            if player is None:
+                return False
+            label = {"left": "左侧玩家", "right": "右侧玩家", "me": "我"}[side]
+            suffix = " [由后续行动反推]" if inferred else ""
+            print(f"微信牌局 >>> {label}：不出{suffix}")
+            self.played_card_signal.emit([player, "Pass"])
+            self.record_hand_inference_action(player, "")
+            apply_action_to_douzero(player, "")
+            expected_side = side_cycle[side]
+            return True
+
+        def pause_douzero(reason):
+            nonlocal douzero_paused_reason
+            if douzero_paused_reason != reason:
+                print(f"DouZero建议暂停 >>> {reason}")
+            douzero_paused_reason = reason
+            self.ai_suggestion_signal.emit([("__PAUSED__", "-", "-")])
+
+        def emit_douzero_suggestion_if_my_turn():
+            nonlocal douzero_paused_reason
+            if any(count_desync.values()):
+                pause_douzero("等待对手出牌与剩余张数完成匹配")
+                return
+            if self.env is None or self.env.game_over:
+                self.ai_suggestion_signal.emit([])
+                return
+            if self.env.acting_player_position != self.my_position:
+                self.ai_suggestion_signal.emit([])
+                return
+
+            try:
+                action_message, action_list = self.env.step(
+                    self.my_position, action=None, update=False
+                )
+                self.action_message = action_message
+
+                inference_result = self.last_hand_inference_result or {}
+                ess_ratio = inference_result.get("effective_sample_ratio", 0.0)
+                top_actions = action_list[:3]
+                enriched_actions = []
+                audit_candidates = []
+
+                left_player = player_for_side("left")
+                right_player = player_for_side("right")
+
+                for model_rank, (action_text, score_text) in enumerate(
+                    top_actions, start=1
+                ):
+                    profile = None
+                    if self.hand_inference is not None and action_text != "Pass":
+                        try:
+                            profile = self.hand_inference.response_profile(
+                                action_text
+                            )
+                        except Exception as risk_exc:
+                            print(f"敌方响应结构计算失败: {risk_exc}")
+
+                    total_text = (
+                        "-" if profile is None
+                        else f"{profile['can_beat']:.0%}"
+                    )
+                    player_profiles = (
+                        {} if profile is None
+                        else profile.get("players", {})
+                    )
+                    left_profile = player_profiles.get(left_player)
+                    right_profile = player_profiles.get(right_player)
+
+                    def split_text(side_profile, key):
+                        return (
+                            "-"
+                            if side_profile is None
+                            else f"{side_profile[key]:.0%}"
+                        )
+
+                    left_ordinary_text = split_text(
+                        left_profile, "ordinary_beat"
+                    )
+                    left_bomb_text = split_text(left_profile, "bomb_only")
+                    right_ordinary_text = split_text(
+                        right_profile, "ordinary_beat"
+                    )
+                    right_bomb_text = split_text(right_profile, "bomb_only")
+
+                    enriched_actions.append(
+                        (
+                            action_text,
+                            score_text,
+                            total_text,
+                            left_ordinary_text,
+                            left_bomb_text,
+                            right_ordinary_text,
+                            right_bomb_text,
+                            model_rank,
+                        )
+                    )
+                    audit_candidates.append({
+                        "action": action_text,
+                        "model_rank": model_rank,
+                        "model_score": float(score_text),
+                        "response_profile": profile,
+                        "physical_sides": {
+                            "left": {
+                                "player": left_player,
+                                "profile": left_profile,
+                            },
+                            "right": {
+                                "player": right_player,
+                                "profile": right_profile,
+                            },
+                        },
+                    })
+
+                self.action_list = enriched_actions
+                self.ai_suggestion_signal.emit(self.action_list)
+                douzero_paused_reason = None
+
+                if enriched_actions:
+                    (
+                        action_text,
+                        score_text,
+                        total_text,
+                        left_ordinary_text,
+                        left_bomb_text,
+                        right_ordinary_text,
+                        right_bomb_text,
+                        _,
+                    ) = enriched_actions[0]
+                    shown = (
+                        "不出"
+                        if action_text == "Pass"
+                        else display_cards(action_text)
+                    )
+                    print(
+                        f"DouZero建议 >>> {shown} "
+                        f"(模型分 {score_text}，敌方总可压 {total_text}；"
+                        f"左 普{left_ordinary_text}/炸{left_bomb_text}；"
+                        f"右 普{right_ordinary_text}/炸{right_bomb_text})"
+                    )
+
+                if top_actions:
+                    raw_action, raw_score = top_actions[0]
+                    raw_profile = (
+                        audit_candidates[0]["response_profile"]
+                        if audit_candidates else None
+                    )
+                    suggestion_audit.append({
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "history_length": len(douzero_history),
+                        "ess_ratio": ess_ratio,
+                        "risk_adjustment_enabled": False,
+                        "raw_top": {
+                            "action": raw_action,
+                            "model_score": float(raw_score),
+                            "response_risk": (
+                                None if raw_profile is None
+                                else raw_profile["can_beat"]
+                            ),
+                            "response_profile": raw_profile,
+                        },
+                        "adjusted_top": None,
+                        "changed_top_action": False,
+                        "candidates": audit_candidates,
+                    })
+            except Exception as exc:
+                pause_douzero(f"建议计算失败：{exc}")
+
+        def rebuild_douzero_from_history():
+            """Rebuild AI state from confirmed public history.
+
+            Recognition history is the source of truth.  GameEnv is disposable
+            derived state, so rebuilding prevents one transient mismatch from
+            poisoning all later suggestions.
+            """
+            nonlocal douzero_paused_reason
+            if douzero_players is None or douzero_initial_data is None:
+                pause_douzero("初始化数据尚未就绪")
+                return False
+
+            try:
+                env = GameEnv(douzero_players)
+                init_data = {
+                    key: list(value)
+                    for key, value in douzero_initial_data.items()
+                }
+                env.card_play_init(init_data)
+
+                for hist_player, hist_cards in douzero_history:
+                    if env.game_over:
+                        break
+                    if env.acting_player_position != hist_player:
+                        pause_douzero(
+                            f"历史顺序不一致：环境等待 {env.acting_player_position}，"
+                            f"历史为 {hist_player}"
+                        )
+                        return False
+                    action_env = sorted(
+                        [RealCard2EnvCard[card] for card in hist_cards]
+                    )
+                    env.step(hist_player, action=action_env, update=True)
+
+                self.env = env
+                douzero_paused_reason = None
+                return True
+            except Exception as exc:
+                pause_douzero(f"历史重建失败：{exc}")
+                return False
+
+        def apply_action_to_douzero(player, cards):
+            douzero_history.append((player, cards))
+            if not rebuild_douzero_from_history():
+                return False
+            emit_douzero_suggestion_if_my_turn()
+            return True
+
+        def queue_round_audit(reason):
+            nonlocal pending_round_audit
+            if self.hand_inference is None:
+                return
+
+            history = [
+                {
+                    "player": player,
+                    "action": cards if cards else "Pass",
+                }
+                for player, cards in self.hand_inference.history
+            ]
+            now = time.monotonic()
+            pending_round_audit = {
+                # Settlement timing varies across the three recordings. Capture
+                # a short burst so the evaluator can choose the frame in which
+                # both revealed hands are actually visible.
+                "capture_times": [now + 0.8, now + 1.6, now + 2.4],
+                "screenshots": [],
+                "audit_stamp": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+                "reason": reason,
+                "ended_at": datetime.now().isoformat(timespec="seconds"),
+                "my_position": self.my_position,
+                "initial_my_hand": "".join(self.hand_inference.initial_my_hand),
+                "three_landlord_cards": "".join(
+                    self.hand_inference.three_landlord_cards
+                ),
+                "public_history": history,
+                "tracked_remaining": dict(tracked_remaining),
+                "observed_remaining": dict(observed_remaining),
+                "count_desync": dict(count_desync),
+                "inference": self.last_hand_inference_result,
+                "douzero_history": [
+                    {
+                        "player": player,
+                        "action": cards if cards else "Pass",
+                    }
+                    for player, cards in douzero_history
+                ],
+                "suggestion_audit": list(suggestion_audit),
+            }
+
+        def flush_round_audit_if_due(screenshot):
+            nonlocal pending_round_audit
+            if pending_round_audit is None:
+                return
+
+            capture_times = pending_round_audit.get("capture_times", [])
+            if not capture_times or time.monotonic() < capture_times[0]:
+                return
+
+            try:
+                root = os.path.join("screenshots", "inference_audits")
+                os.makedirs(root, exist_ok=True)
+                stamp = pending_round_audit["audit_stamp"]
+                index = len(pending_round_audit["screenshots"]) + 1
+                image_name = f"{stamp}_{index}.png"
+                image_path = os.path.join(root, image_name)
+                screenshot.save(image_path)
+                pending_round_audit["screenshots"].append(image_name)
+                capture_times.pop(0)
+
+                if capture_times:
+                    return
+
+                json_name = f"{stamp}.json"
+                json_path = os.path.join(root, json_name)
+                payload = dict(pending_round_audit)
+                payload.pop("capture_times", None)
+                payload.pop("audit_stamp", None)
+                payload["format"] = "wechat_inference_audit_v3"
+
+                with open(json_path, "w", encoding="utf-8") as fp:
+                    json.dump(payload, fp, ensure_ascii=False, indent=2)
+
+                print(
+                    f"推牌审计已保存 >>> {json_path} "
+                    f"(结算截图 {len(payload['screenshots'])} 张)"
+                )
+                pending_round_audit = None
+            except Exception as exc:
+                print(f"推牌审计保存失败: {exc}")
+                pending_round_audit = None
+
+        def reset_round_detection_state(reason):
+            """Clear stale per-round recognition state at a visual boundary."""
+            nonlocal round_signature, expected_side, confirmed_my_hand
+            nonlocal pre_landlord_hand, wechat_other_hands_cards_str
+            nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
+            nonlocal last_init_diag_signature, last_init_diag_time
+            nonlocal self_hand_missing_frames, midgame_wait_announced
+
+            print(f"[ROUND/RESET] {reason}，清理上一局缓存，等待下一局")
+            pending.clear()
+            round_signature = None
+            expected_side = None
+            confirmed_my_hand = None
+            pre_landlord_hand = None
+            wechat_other_hands_cards_str = ""
+            preinit_counts["left"] = None
+            preinit_counts["right"] = None
+            tracked_remaining["left"] = None
+            tracked_remaining["right"] = None
+            observed_remaining["left"] = None
+            observed_remaining["right"] = None
+            count_desync["left"] = False
+            count_desync["right"] = False
+            count_missing_frames["left"] = 0
+            count_missing_frames["right"] = 0
+            self_hand_missing_frames = 0
+            for side in recent_play:
+                recent_play[side] = {"cards": "", "time": 0.0}
+            recent_self_plays.clear()
+            for side in pass_latched:
+                pass_latched[side] = False
+            last_state["three_cards"] = None
+            last_state["position_code"] = None
+            douzero_history.clear()
+            suggestion_audit.clear()
+            douzero_initial_data = None
+            douzero_players = None
+            douzero_paused_reason = None
+            self.env = None
+            self.hand_inference = None
+            self.my_position_code = None
+            self.my_position = ""
+            self.action_list = []
+            self.ai_suggestion_signal.emit([])
+            self.my_position_signal.emit("")
+            self.card_recorder_signal.emit("")
+            last_init_diag_signature = None
+            last_init_diag_time = 0.0
+            midgame_wait_announced = False
+
+        def initialize_round(my_hand, three_cards, position_code):
+            nonlocal round_initialized, round_signature, expected_side
+            nonlocal confirmed_my_hand, wechat_other_hands_cards_str
+            nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
+
+            self.my_hand_cards = my_hand
+            self.three_cards = three_cards
+            self.my_position_code = position_code
+            self.my_position = PlayerPosition[position_code]
+            confirmed_my_hand = my_hand
+
+            self.hand_inference = HandInferenceEngine(
+                my_position=self.my_position,
+                my_hand_cards=my_hand,
+                three_landlord_cards=three_cards,
+                sample_count=self.config.inference_sample_count,
+                pass_penalty=self.config.inference_pass_penalty,
+                friendly_pass_penalty=self.config.inference_friendly_pass_penalty,
+                play_behavior_floor=self.config.inference_play_behavior_floor,
+                play_behavior_strength=self.config.inference_play_behavior_strength,
+                behavior_temperature=self.config.inference_behavior_temperature,
+                min_effective_sample_ratio=self.config.inference_min_effective_sample_ratio,
+            )
+
+            # Build the original DouZero environment from the same confirmed
+            # WeChat state. Opponent card identities are intentionally unknown;
+            # game_new.py tracks their counts while the user's infoset uses the
+            # complete unseen-card pool, matching the original project design.
+            self.my_hand_cards_env = sorted(
+                [RealCard2EnvCard[card] for card in my_hand]
+            )
+            self.three_cards_env = sorted(
+                [RealCard2EnvCard[card] for card in three_cards]
+            )
+            self.other_hands_cards = []
+            self.all_player_card_data = {}
+            self.env = None
+            douzero_history.clear()
+            suggestion_audit.clear()
+            douzero_initial_data = None
+            douzero_players = None
+            douzero_paused_reason = None
+            try:
+                self.initOtherPlayerHandCards()
+                self.initAllPlayerCardData()
+                self.create_ai_representer()
+                douzero_players = self.env.players
+                douzero_initial_data = {
+                    key: list(value)
+                    for key, value in self.all_player_card_data.items()
+                }
+                if rebuild_douzero_from_history():
+                    print("DouZero只读建议环境已初始化（历史可重建）")
+            except Exception as exc:
+                self.env = None
+                pause_douzero(f"初始化失败：{exc}")
+
+            landlord_side = landlord_start_side[position_code]
+            for side in ("left", "right"):
+                tracked_remaining[side] = 20 if side == landlord_side else 17
+                observed_remaining[side] = (
+                    preinit_counts[side]
+                    if preinit_counts[side] == tracked_remaining[side]
+                    else None
+                )
+                count_desync[side] = False
+
+            if self.other_hands_cards_str:
+                wechat_other_hands_cards_str = self.other_hands_cards_str
+            else:
+                remaining = list(AllEnvCard)
+                for card in [RealCard2EnvCard[ch] for ch in my_hand]:
+                    if card in remaining:
+                        remaining.remove(card)
+                wechat_other_hands_cards_str = ''.join(
+                    [EnvCard2RealCard[x] for x in remaining]
+                )[::-1]
+                self.other_hands_cards_str = wechat_other_hands_cards_str
+
+            self.card_recorder_signal.emit(wechat_other_hands_cards_str)
+            self.three_cards_signal.emit(three_cards)
+            self.my_position_signal.emit(self.my_position)
+            emit_remaining_counts()
+
+            expected_side = landlord_start_side[position_code]
+            round_signature = (my_hand, three_cards, position_code)
+            round_initialized = True
+            for side in pass_latched:
+                pass_latched[side] = False
+            for side in recent_play:
+                recent_play[side] = {"cards": "", "time": 0.0}
+            recent_self_plays.clear()
+
+            print()
+            print("===== 微信牌局状态已初始化 =====")
+            print(f"我的初始手牌({len(my_hand)}): {display_cards(my_hand)}")
+            print(f"三张底牌: {display_cards(three_cards)}")
+            print(f"我的身份: {self.my_position}")
+            print(f"首个行动方: {expected_side}")
+            print("==============================")
+            print()
+            self.refresh_hand_inference()
+            emit_douzero_suggestion_if_my_turn()
+
+        def pending_self_change(raw_hand):
+            if not round_initialized or not confirmed_my_hand or not raw_hand:
+                return False
+            removed = hand_difference(confirmed_my_hand, raw_hand)
+            return removed is not None and len(removed) > 0
+
+        def can_infer_pass(side, live_counts, raw_hand):
+            if side == "me":
+                return not pending_self_change(raw_hand)
+            count = live_counts.get(side)
+            tracked = tracked_remaining.get(side)
+            if count is not None and tracked is not None and count < tracked:
+                return False
+            return True
+
+        def sync_to_actor(actor, live_counts, raw_hand):
+            nonlocal expected_side
+            guard = 0
+            while expected_side is not None and expected_side != actor and guard < 3:
+                if not can_infer_pass(expected_side, live_counts, raw_hand):
+                    return False
+                if not record_pass(expected_side, inferred=True):
+                    return False
+                guard += 1
+            return expected_side == actor
+
+        while self.worker_runing:
+            screenshot, _ = await self.screenHelper.getScreenshot()
+            if screenshot is None:
+                if not missing_reported:
+                    print("未找到或无法截图‘腾讯欢乐斗地主’窗口，请保持小程序窗口打开")
+                    missing_reported = True
+                await asyncio.sleep(0.5)
+                continue
+
+            missing_reported = False
+            flush_round_audit_if_due(screenshot)
+            if not screenshot_saved:
+                os.makedirs('screenshots', exist_ok=True)
+                calibration_path = os.path.join('screenshots', 'wechat_calibration.png')
+                screenshot.save(calibration_path)
+                description = self.screenHelper.get_window_description() or {}
+                print(
+                    f"已连接微信斗地主窗口："
+                    f"{description.get('title', '腾讯欢乐斗地主')} "
+                    f"[{description.get('class_name', '-')} ]"
+                )
+                print(f"客户区截图尺寸：{screenshot.size[0]} x {screenshot.size[1]}")
+                print(f"标定截图已保存：{calibration_path}")
+                print()
+                screenshot_saved = True
+
+            try:
+                now = time.monotonic()
+                raw_hand = recognizer.recognize_my_hand(screenshot)
+                init_hand = stable_value("init_hand", raw_hand, frames=5)
+                live_hand = stable_value("live_hand", raw_hand, frames=3)
+
+                raw_counts = {
+                    side: recognizer.recognize_remaining_count(screenshot, side, expected=None)
+                    for side in ("left", "right")
+                }
+                for side in ("left", "right"):
+                    if raw_counts[side] is None:
+                        count_missing_frames[side] += 1
+                    else:
+                        count_missing_frames[side] = 0
+
+                if round_initialized and not raw_hand:
+                    self_hand_missing_frames += 1
+                else:
+                    self_hand_missing_frames = 0
+                live_counts = {
+                    side: stable_value(f"live_{side}_count", raw_counts[side], frames=4)
+                    for side in ("left", "right")
+                }
+
+                visually_blank = (
+                    not raw_hand
+                    and raw_counts.get("left") is None
+                    and raw_counts.get("right") is None
+                )
+                if visually_blank:
+                    scene_blank_frames += 1
+                else:
+                    scene_blank_frames = 0
+
+                # Fallback end detection: an active round that loses both the
+                # hand and both remaining-count badges for ~4 seconds is almost
+                # certainly on the settlement/transition screen.  Normal short
+                # animations in the supplied recordings lasted only a couple
+                # of frames, so require a much longer blank before ending.
+                if round_initialized and scene_blank_frames >= 12:
+                    print(
+                        "[ROUND/END] 连续检测到结算/过渡空白画面，"
+                        "按牌局结束处理"
+                    )
+                    queue_round_audit("visual_settlement")
+                    self.ai_suggestion_signal.emit([])
+                    round_initialized = False
+                    expected_side = None
+
+                # Whether the previous round was fully initialized or the tool
+                # was started halfway through a game, a sustained blank scene
+                # is the safe boundary at which stale role/bottom/count state
+                # can be discarded.  This is what enables continuous multi-
+                # round operation without restarting the worker.
+                if (
+                    not round_initialized
+                    and scene_blank_frames >= 6
+                    and not round_boundary_seen
+                ):
+                    reset_round_detection_state("检测到牌局结算/过渡画面")
+                    round_boundary_seen = True
+
+                if (
+                    round_boundary_seen
+                    and init_hand is not None
+                    and len(init_hand) in (17, 20)
+                ):
+                    print(
+                        f"[ROUND/START] 检测到新一局稳定牌面："
+                        f"我的手牌 {len(init_hand)} 张，"
+                        f"左={raw_counts.get('left')}，右={raw_counts.get('right')}"
+                    )
+                    round_boundary_seen = False
+
+                if not round_initialized:
+                    for side in ("left", "right"):
+                        if live_counts[side] is not None:
+                            preinit_counts[side] = live_counts[side]
+
+                    if init_hand is not None and len(init_hand) == 17:
+                        pre_landlord_hand = init_hand
+
+                    landlord_side = recognizer.detect_landlord_side(screenshot)
+                    position_map = {"right": 0, "me": 1, "left": 2}
+                    badge_position = stable_value(
+                        "badge_position", position_map.get(landlord_side), frames=3
+                    )
+                    inferred_position = badge_position
+                    if init_hand is not None and len(init_hand) == 20:
+                        inferred_position = 1
+                    elif preinit_counts["left"] == 20:
+                        inferred_position = 2
+                    elif preinit_counts["right"] == 20:
+                        inferred_position = 0
+
+                    position_code = stable_value(
+                        "position_code", inferred_position, frames=3
+                    )
+                    if (
+                        position_code is not None
+                        and position_code != last_state["position_code"]
+                    ):
+                        position_text = {
+                            0: "农民（地主上家）",
+                            1: "地主",
+                            2: "农民（地主下家）",
+                        }[position_code]
+                        evidence = (
+                            "20张手牌" if position_code == 1
+                            else "左侧20张" if position_code == 2 and preinit_counts["left"] == 20
+                            else "右侧20张" if position_code == 0 and preinit_counts["right"] == 20
+                            else "地主标志"
+                        )
+                        print(f"微信专用识牌 >>> 我的身份: {position_text} [{evidence}]")
+                        last_state["position_code"] = position_code
+
+                    raw_bottom = recognizer.recognize_bottom_cards(screenshot)
+                    top_bottom = stable_value(
+                        "three_cards", raw_bottom, frames=2
+                    )
+                    three_cards = top_bottom
+                    if (
+                        last_state["position_code"] == 1
+                        and init_hand is not None
+                        and len(init_hand) == 20
+                        and pre_landlord_hand is not None
+                    ):
+                        added = hand_difference(init_hand, pre_landlord_hand)
+                        if added is not None and len(added) == 3:
+                            three_cards = added
+
+                    if three_cards is not None and len(three_cards) == 3:
+                        if three_cards != last_state["three_cards"]:
+                            source = (
+                                " [17→20手牌差分]"
+                                if last_state["position_code"] == 1
+                                else ""
+                            )
+                            print(
+                                f"微信专用识牌 >>> 三张底牌: "
+                                f"{display_cards(three_cards)}{source}"
+                            )
+                            last_state["three_cards"] = three_cards
+
+                    ready_position = last_state["position_code"]
+                    ready_hand = init_hand or ""
+                    ready_three = last_state["three_cards"] or ""
+                    expected_count = (
+                        20 if ready_position == 1
+                        else 17 if ready_position is not None
+                        else None
+                    )
+
+                    hand_pending = pending.get("init_hand", (None, 0))[1]
+                    left_count_pending = pending.get(
+                        "live_left_count", (None, 0)
+                    )[1]
+                    right_count_pending = pending.get(
+                        "live_right_count", (None, 0)
+                    )[1]
+                    role_pending = pending.get(
+                        "position_code", (None, 0)
+                    )[1]
+                    bottom_pending = pending.get(
+                        "three_cards", (None, 0)
+                    )[1]
+
+                    wait_reasons = []
+                    if ready_position is None:
+                        wait_reasons.append("身份尚未稳定")
+                    if expected_count is None:
+                        wait_reasons.append("无法确定目标手牌张数")
+                    elif len(ready_hand) != expected_count:
+                        if not raw_hand:
+                            wait_reasons.append(
+                                f"未识别到手牌(目标{expected_count}张)"
+                            )
+                        elif init_hand is None:
+                            wait_reasons.append(
+                                f"手牌未稳定(raw={len(raw_hand)}张, "
+                                f"连续{hand_pending}/5帧, 目标{expected_count}张)"
+                            )
+                        else:
+                            wait_reasons.append(
+                                f"稳定手牌张数不符("
+                                f"{len(ready_hand)}/{expected_count})"
+                            )
+                    if len(ready_three) != 3:
+                        if not raw_bottom:
+                            wait_reasons.append("未识别到三张底牌")
+                        elif top_bottom is None:
+                            wait_reasons.append(
+                                f"底牌未稳定(raw={display_cards(raw_bottom)}, "
+                                f"连续{bottom_pending}/2帧)"
+                            )
+                        else:
+                            wait_reasons.append(
+                                f"底牌张数异常({len(top_bottom)}张)"
+                            )
+
+                    diag_signature = (
+                        raw_hand,
+                        init_hand,
+                        raw_counts.get("left"),
+                        live_counts.get("left"),
+                        raw_counts.get("right"),
+                        live_counts.get("right"),
+                        landlord_side,
+                        badge_position,
+                        inferred_position,
+                        position_code,
+                        raw_bottom,
+                        top_bottom,
+                        tuple(wait_reasons),
+                    )
+                    if (
+                        diag_signature != last_init_diag_signature
+                        or now - last_init_diag_time >= 2.0
+                    ):
+                        print(
+                            f"[INIT/HAND] raw={len(raw_hand) if raw_hand else 0} "
+                            f"[{display_cards(raw_hand)}] | "
+                            f"stable={len(init_hand) if init_hand else 0} "
+                            f"[{display_cards(init_hand)}] | "
+                            f"连续={hand_pending}/5 | "
+                            f"目标={expected_count if expected_count is not None else '-'}"
+                        )
+                        print(
+                            f"[INIT/COUNT] 左 raw={raw_counts.get('left')} "
+                            f"stable={live_counts.get('left')} "
+                            f"连续={left_count_pending}/4 cache={preinit_counts['left']} | "
+                            f"右 raw={raw_counts.get('right')} "
+                            f"stable={live_counts.get('right')} "
+                            f"连续={right_count_pending}/4 cache={preinit_counts['right']}"
+                        )
+                        print(
+                            f"[INIT/ROLE] badge={landlord_side or '-'} "
+                            f"badge_stable={badge_position} "
+                            f"inferred={inferred_position} "
+                            f"stable={position_code} 连续={role_pending}/3 "
+                            f"committed={last_state['position_code']}"
+                        )
+                        bottom_debug = getattr(
+                            recognizer, "last_bottom_debug", None
+                        )
+                        slot_debug = ""
+                        if bottom_debug:
+                            parts = []
+                            for item in bottom_debug:
+                                rank = item.get("rank")
+                                rank_text = display_cards(rank) if rank else "-"
+                                score = item.get("score")
+                                score_text = (
+                                    "-" if score is None
+                                    else f"{float(score):.2f}"
+                                )
+                                source = item.get("source", "-")
+                                parts.append(
+                                    f"S{item.get('slot')}={rank_text}"
+                                    f"/{score_text}/{source}"
+                                )
+                            slot_debug = " | slots " + " ".join(parts)
+                        print(
+                            f"[INIT/BOTTOM] raw={display_cards(raw_bottom)} "
+                            f"stable={display_cards(top_bottom)} "
+                            f"连续={bottom_pending}/2 "
+                            f"committed={display_cards(last_state['three_cards'])}"
+                            f"{slot_debug}"
+                        )
+                        if wait_reasons:
+                            print("[INIT/WAIT] " + "；".join(wait_reasons))
+                        else:
+                            print("[INIT/READY] 初始化条件全部满足")
+                        print()
+                        last_init_diag_signature = diag_signature
+                        last_init_diag_time = now
+                    if (
+                        expected_count is not None
+                        and len(ready_hand) == expected_count
+                        and len(ready_three) == 3
+                    ):
+                        signature = (ready_hand, ready_three, ready_position)
+                        if signature != round_signature:
+                            initialize_round(ready_hand, ready_three, ready_position)
+
+                if not round_initialized:
+                    ready_position = last_state["position_code"]
+                    expected_initial = (
+                        20 if ready_position == 1
+                        else 17 if ready_position is not None
+                        else None
+                    )
+                    if (
+                        not midgame_wait_announced
+                        and expected_initial is not None
+                        and init_hand is not None
+                        and 0 < len(init_hand) < expected_initial
+                    ):
+                        print(
+                            f"[ROUND/MIDGAME] 当前稳定手牌 {len(init_hand)} 张，"
+                            f"少于新局初始 {expected_initial} 张；"
+                            "判定为中途接入，本局不伪造历史，等待结算后自动接下一局"
+                        )
+                        midgame_wait_announced = True
+                    await asyncio.sleep(0.35)
+                    continue
+
+                # Keep stable play candidates for both opponents, independent of
+                # whose turn we currently think it is.  Count changes decide
+                # whether the candidate becomes a committed action.
+                played_values = {
+                    "left": recognizer.recognize_left_played(screenshot),
+                    "right": recognizer.recognize_right_played(screenshot),
+                    "me": recognizer.recognize_my_played(screenshot),
+                }
+                for side in ("left", "right"):
+                    cards = stable_value(
+                        f"{side}_play_candidate", played_values[side], frames=2
+                    )
+                    if cards:
+                        recent_play[side] = {"cards": cards, "time": now}
+
+                self_visual = stable_value(
+                    "me_play_candidate", played_values.get("me", ""), frames=2
+                )
+                if self_visual and is_legal_play(self_visual):
+                    if (
+                        not recent_self_plays
+                        or recent_self_plays[-1]["cards"] != self_visual
+                    ):
+                        recent_self_plays.append(
+                            {"cards": self_visual, "time": now}
+                        )
+                recent_self_plays[:] = [
+                    item
+                    for item in recent_self_plays
+                    if now - item["time"] <= 6.0
+                ]
+
+                # Prefer an action from the currently expected seat.  If a later
+                # seat has hard evidence, skipped seats are logically Pass.
+                self_removed = None
+                self_final_out = False
+                self_corrected_after = None
+                if live_hand and confirmed_my_hand and live_hand != confirmed_my_hand:
+                    self_removed = hand_difference(confirmed_my_hand, live_hand)
+                    if self_removed == "":
+                        confirmed_my_hand = live_hand
+                        self_removed = None
+                    elif self_removed and not is_legal_play(self_removed):
+                        # The after-hand OCR can temporarily miss a raised card,
+                        # e.g. a real KK play appears as an impossible KK7 delta.
+                        # Do not trust the *current* table image: it may already
+                        # contain a later/stale card.  Search only legal table
+                        # plays cached since our previous committed action, and
+                        # require them to be a multiset subset of the illegal
+                        # hand delta.  Prefer the largest candidate, newest on tie.
+                        delta_counter = Counter(self_removed)
+                        confirmed_counter = Counter(confirmed_my_hand)
+                        candidates = []
+                        for item in recent_self_plays:
+                            candidate = item["cards"]
+                            candidate_counter = Counter(candidate)
+                            if not candidate or not is_legal_play(candidate):
+                                continue
+                            if not all(
+                                candidate_counter[card] <= delta_counter[card]
+                                for card in candidate_counter
+                            ):
+                                continue
+                            if not all(
+                                candidate_counter[card] <= confirmed_counter[card]
+                                for card in candidate_counter
+                            ):
+                                continue
+                            candidates.append(item)
+
+                        if candidates:
+                            best = max(
+                                candidates,
+                                key=lambda item: (
+                                    len(item["cards"]), item["time"]
+                                ),
+                            )
+                            visual_candidate = best["cards"]
+                            corrected_after = remove_chars_from_string(
+                                confirmed_my_hand, visual_candidate
+                            )
+                            print(
+                                f"我的出牌差分纠错 >>> 原差分 "
+                                f"{display_cards(self_removed)} 非法；"
+                                f"近期桌面合法候选 "
+                                f"{display_cards(visual_candidate)}，"
+                                "采用该牌型并反算剩余手牌"
+                            )
+                            self_removed = visual_candidate
+                            self_corrected_after = corrected_after
+                        else:
+                            print(
+                                f"手牌差分候选未采信 >>> {display_cards(self_removed)} "
+                                "不是合法牌型，且近期没有可验证的桌面候选"
+                            )
+                            self_removed = None
+
+                if (
+                    not self_removed
+                    and confirmed_my_hand
+                    and expected_side == "me"
+                ):
+                    # Final local plays are easier to prove from the table than
+                    # from the hand area: after the last card(s) leave, the UI
+                    # can immediately enter settlement animation and briefly
+                    # hallucinate hand glyphs.  If the table stably shows every
+                    # remaining card as one legal move, that is sufficient hard
+                    # evidence that the local player went out.
+                    raw_final_cards = recognizer.recognize_my_played(
+                        screenshot, expected_count=len(confirmed_my_hand)
+                    )
+                    final_cards = stable_value(
+                        "my_final_play", raw_final_cards, frames=2
+                    )
+                    if (
+                        final_cards
+                        and Counter(final_cards) == Counter(confirmed_my_hand)
+                        and is_legal_play(final_cards)
+                    ):
+                        self_removed = final_cards
+                        self_final_out = True
+
+                def opponent_candidate(side):
+                    new_count = live_counts.get(side)
+                    old_count = tracked_remaining.get(side)
+                    if old_count is None:
+                        return None
+
+                    drop = None
+                    target_count = None
+                    source = None
+                    if new_count is not None and new_count < old_count:
+                        drop = old_count - new_count
+                        target_count = new_count
+                        source = "剩余张数下降"
+                    elif (
+                        new_count is None
+                        and count_missing_frames[side] >= 4
+                        and old_count > 0
+                    ):
+                        # On the final play the blue count badge disappears
+                        # immediately instead of showing 0.  If the visible
+                        # play contains every remaining card, that is hard
+                        # evidence that the player went out.
+                        drop = old_count
+                        target_count = 0
+                        source = "牌数框消失+全手出完"
+                    else:
+                        return None
+
+                    info = recent_play[side]
+                    cards = info["cards"] if now - info["time"] <= 3.0 else ""
+                    if not cards or len(cards) != drop:
+                        if side == "left":
+                            cards = recognizer.recognize_left_played(
+                                screenshot, expected_count=drop
+                            )
+                        else:
+                            cards = recognizer.recognize_right_played(
+                                screenshot, expected_count=drop
+                            )
+
+                    if cards and len(cards) == drop and is_legal_play(cards):
+                        return (cards, target_count, source)
+                    if cards and len(cards) == drop and not is_legal_play(cards):
+                        print(
+                            f"对手出牌候选未采信 >>> "
+                            f"{'左侧' if side == 'left' else '右侧'} "
+                            f"{display_cards(cards)} 张数正确但牌型不合法"
+                        )
+                    return None
+
+                action_committed = False
+                for _ in range(3):
+                    if expected_side is None:
+                        break
+
+                    actor = None
+                    payload = None
+                    order = [
+                        expected_side,
+                        side_cycle[expected_side],
+                        side_cycle[side_cycle[expected_side]],
+                    ]
+                    for side in order:
+                        if side == "me":
+                            if self_removed:
+                                actor = "me"
+                                payload = self_removed
+                                break
+                        else:
+                            candidate = opponent_candidate(side)
+                            if candidate is not None:
+                                actor = side
+                                payload = candidate
+                                break
+
+                    if actor is None:
+                        break
+                    if not sync_to_actor(actor, live_counts, raw_hand):
+                        break
+
+                    if actor == "me":
+                        visual = played_values.get("me") or ""
+                        if visual and visual != payload:
+                            print(
+                                f"我的出牌校正 >>> 桌面识别 {display_cards(visual)}；"
+                                f"手牌差分 {display_cards(payload)}，采用手牌差分"
+                            )
+                        print(f"微信牌局 >>> 我的出牌: {display_cards(payload)}")
+                        self.played_card_signal.emit([self.my_position, payload])
+                        self.record_hand_inference_action(self.my_position, payload)
+                        apply_action_to_douzero(self.my_position, payload)
+                        confirmed_my_hand = (
+                            ""
+                            if self_final_out
+                            else self_corrected_after
+                            if self_corrected_after is not None
+                            else live_hand
+                        )
+                        self_removed = None
+                        self_corrected_after = None
+                        recent_self_plays.clear()
+                        expected_side = "right"
+                        action_committed = True
+                        if self_final_out or not confirmed_my_hand:
+                            print("微信牌局 >>> 我的手牌归零，本局结束")
+                            queue_round_audit("my_hand_zero")
+                            self.ai_suggestion_signal.emit([])
+                            round_initialized = False
+                            expected_side = None
+                            reset_round_detection_state("我方手牌归零，本局结束")
+                            round_boundary_seen = True
+                            break
+                    else:
+                        cards, new_count, evidence = payload
+                        player = player_for_side(actor)
+                        if player is None:
+                            break
+                        label = "左侧" if actor == "left" else "右侧"
+                        print(
+                            f"微信牌局 >>> {label}出牌: {display_cards(cards)} "
+                            f"[剩余 {tracked_remaining[actor]}→{new_count}；{evidence}]"
+                        )
+                        self.played_card_signal.emit([player, cards])
+                        wechat_other_hands_cards_str = remove_chars_from_string(
+                            wechat_other_hands_cards_str, cards
+                        )
+                        self.other_hands_cards_str = wechat_other_hands_cards_str
+                        self.card_recorder_signal.emit(wechat_other_hands_cards_str)
+                        tracked_remaining[actor] = new_count
+                        observed_remaining[actor] = new_count
+                        count_desync[actor] = False
+                        recent_play[actor] = {"cards": "", "time": 0.0}
+                        emit_remaining_counts()
+                        self.record_hand_inference_action(player, cards)
+                        apply_action_to_douzero(player, cards)
+                        expected_side = side_cycle[actor]
+                        action_committed = True
+                        if new_count == 0:
+                            print(f"微信牌局 >>> {label}剩余 0 张，本局结束")
+                            queue_round_audit(f"{actor}_remaining_zero")
+                            self.ai_suggestion_signal.emit([])
+                            round_initialized = False
+                            expected_side = None
+                            reset_round_detection_state(
+                                f"{label}剩余0张，本局结束"
+                            )
+                            round_boundary_seen = True
+                            break
+
+                # Count OCR also validates state even when no new play is ready.
+                if round_initialized:
+                    for side, label in (("left", "左侧"), ("right", "右侧")):
+                        count = live_counts.get(side)
+                        tracked = tracked_remaining.get(side)
+                        if count is None or tracked is None:
+                            continue
+                        if count == tracked:
+                            if observed_remaining[side] != count or count_desync[side]:
+                                observed_remaining[side] = count
+                                count_desync[side] = False
+                                print(f"剩余张数 >>> {label}: {count} [画面确认]")
+                                emit_remaining_counts()
+                        elif count < tracked:
+                            candidate = opponent_candidate(side)
+                            count_desync[side] = candidate is None
+                            if count_desync[side]:
+                                observed_remaining[side] = count
+                                print(
+                                    f"剩余张数校验 >>> {label}画面 {count}，"
+                                    f"历史 {tracked}；等待匹配 {tracked - count} 张出牌"
+                                )
+                                emit_remaining_counts()
+
+                # Explicit Pass remains useful, but it is no longer a single
+                # point of failure: later confirmed actions can reconstruct a
+                # missed Pass through sync_to_actor().
+                if round_initialized:
+                    passes = stable_value(
+                        "passes", frozenset(recognizer.detect_pass_sides(screenshot)), frames=2
+                    )
+                    if passes is not None:
+                        pass_set = set(passes)
+                        for side in pass_latched:
+                            if side not in pass_set:
+                                pass_latched[side] = False
+
+                        for _ in range(2):
+                            if (
+                                expected_side in pass_set
+                                and not pass_latched[expected_side]
+                            ):
+                                side = expected_side
+                                pass_latched[side] = True
+                                record_pass(side, inferred=False)
+                            else:
+                                break
+
+            except Exception as exc:
+                print(f"微信牌局接入异常（不会退出线程）: {exc}")
+
+            await asyncio.sleep(0.35)
+
+        print("微信小程序牌局接入线程已停止")
+        print()
 
     async def before_start(self):
         print('正在检测是否开局...')
@@ -200,6 +1483,21 @@ class WorkerThread(QThread):
         print("正在处理本次牌局数据...")
         self.initOtherPlayerHandCards()
         self.initAllPlayerCardData()
+
+        # 独立于 DouZero 的隐藏手牌概率模型。这里直接复用屏幕识别得到的真实牌局状态。
+        self.hand_inference = HandInferenceEngine(
+            my_position=self.my_position,
+            my_hand_cards=self.my_hand_cards,
+            three_landlord_cards=self.three_cards,
+            sample_count=self.config.inference_sample_count,
+            pass_penalty=self.config.inference_pass_penalty,
+            friendly_pass_penalty=self.config.inference_friendly_pass_penalty,
+            play_behavior_floor=self.config.inference_play_behavior_floor,
+            play_behavior_strength=self.config.inference_play_behavior_strength,
+            behavior_temperature=self.config.inference_behavior_temperature,
+            min_effective_sample_ratio=self.config.inference_min_effective_sample_ratio,
+        )
+        self.refresh_hand_inference()
         print()
 
         self.play_order = 0 if self.my_position == "landlord" else 1 if self.my_position == "landlord_up" else 2
@@ -319,6 +1617,7 @@ class WorkerThread(QThread):
 
         self.action_message = None
         self.action_list = None
+        self.hand_inference = None
 
     def reset_ui_status(self):
         self.card_recorder_signal.emit('')
@@ -328,6 +1627,7 @@ class WorkerThread(QThread):
         self.bid_win_rate_signal.emit([])
         self.game_win_rate_signal.emit(-1000)
         self.played_card_signal.emit([])
+        self.hand_inference_signal.emit({})
 
     def stop_task(self):
         print("正在停止工作线程...")
@@ -460,6 +1760,7 @@ class WorkerThread(QThread):
                 self.card_recorder_signal.emit(self.other_hands_cards_str)
             
             tempData = rightPlayedCards if rightPlayed else ""
+            self.record_hand_inference_action(rightPosition, tempData)
             self.other_played_cards_env = [RealCard2EnvCard[c] for c in list(tempData)]
             self.other_played_cards_env.sort()
             self.env.step(self.my_position, self.other_played_cards_env)
@@ -519,6 +1820,7 @@ class WorkerThread(QThread):
                 self.card_recorder_signal.emit(self.other_hands_cards_str)
             
             tempData = leftPlayedCards if leftPlayed else ""
+            self.record_hand_inference_action(leftPosition, tempData)
             self.other_played_cards_env = [RealCard2EnvCard[c] for c in list(tempData)]
             self.other_played_cards_env.sort()
             self.env.step(self.my_position, self.other_played_cards_env)
@@ -607,6 +1909,7 @@ class WorkerThread(QThread):
         
         if (myBuchu is not None) or myPlayed:
             tempData = myPlayedCards if myPlayed else ""
+            self.record_hand_inference_action(self.my_position, tempData)
             self.my_played_cards_env = [RealCard2EnvCard[c] for c in list(tempData)]
             self.my_played_cards_env.sort()
             self.env.step(self.my_position, self.my_played_cards_env)
@@ -622,6 +1925,37 @@ class WorkerThread(QThread):
             
             self.ai_suggested_received = False
             self.my_played_card_clicked = False
+
+    def refresh_hand_inference(self):
+        """重新计算并发送两家隐藏手牌概率；失败时不影响原有牌局线程。"""
+        if self.hand_inference is None:
+            return
+
+        try:
+            result = self.hand_inference.infer()
+            self.last_hand_inference_result = result
+            self.hand_inference_signal.emit(result)
+
+            summary = HandInferenceEngine.compact_summary(result)
+            if summary:
+                print("推牌 >>>", summary)
+                print()
+        except Exception as exc:
+            # 推牌器属于辅助层，任何异常都不能打断原项目的识牌和 DouZero 流程。
+            print(f"推牌器更新失败: {exc}")
+            print()
+
+    def record_hand_inference_action(self, player, cards):
+        """记录一次屏幕识别到的公开动作并刷新后验概率。"""
+        if self.hand_inference is None:
+            return
+
+        try:
+            self.hand_inference.observe(player, cards)
+            self.refresh_hand_inference()
+        except Exception as exc:
+            print(f"推牌器记录动作失败: player={player}, cards={cards}, error={exc}")
+            print()
 
     async def autoBidding(self):
         self.in_bidding_progress = True

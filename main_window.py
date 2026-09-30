@@ -9,10 +9,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.screenHelper = ScreenHelper()
-        self.max_width = 778
-        self.max_height = 480
+        self.max_width = 960
+        self.max_height = 650
 
-        self.setWindowTitle("QQ 游戏大厅 - 欢乐斗地主 AI 辅助")
+        if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
+            self.setWindowTitle("微信小程序 - 欢乐斗地主 AI 辅助")
+        else:
+            self.setWindowTitle("QQ 游戏大厅 - 欢乐斗地主 AI 辅助")
         self.setGeometry(320, 160, self.max_width, self.max_height)
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.CustomizeWindowHint | QtCore.Qt.WindowTitleHint | QtCore.Qt.WindowCloseButtonHint)
 
@@ -24,14 +27,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_card_counter_table()
         self.create_label()
         self.create_other_tables()
+        self.create_inference_table()
         self.create_actions()
 
         self.workerThread = None
+        self.observedRemainingCounts = {}
+        self.currentMyPosition = None
         self.bid_threshold = 0.6
         self.redouble_threshold = 0.65
         self.super_redouble_threshold = 0.7
         self.mingpai_threshold = 0.95
-        self.automatic_mode = AutomaticModeEnum.FULL.value
+        if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
+            self.automatic_mode = AutomaticModeEnum.MANUAL.value
+        else:
+            self.automatic_mode = AutomaticModeEnum.FULL.value
         self.screenHelper.setWindowSize()
 
     # 禁用窗口拖拽和缩放
@@ -78,18 +87,45 @@ class MainWindow(QtWidgets.QMainWindow):
             self.workerThread.bid_win_rate_signal.connect(self.handle_bid_win_rate_update)
             self.workerThread.game_win_rate_signal.connect(self.handle_game_win_rate_update)
             self.workerThread.played_card_signal.connect(self.handle_played_card_update)
+            self.workerThread.hand_inference_signal.connect(self.handle_hand_inference_update)
+            self.workerThread.remaining_count_signal.connect(self.handle_remaining_count_update)
 
         if not self.workerThread.isRunning():
             self.workerThread.start()
             self.startBtn.setText("停止")
             self.set_status(True)
         else:
-            self.workerThread.stop_task()
-            self.workerThread.quit()
-            self.workerThread.wait()
-            self.workerThread = None
-            self.startBtn.setText("启动")
-            self.set_status(False)
+            self.stop_worker_thread()
+
+    def stop_worker_thread(self):
+        if self.workerThread is None:
+            return
+
+        self.workerThread.stop_task()
+        if self.workerThread.isRunning():
+            self.workerThread.wait(3000)
+
+        # The worker normally stops cooperatively. Keep a bounded fallback so a
+        # recognition loop can never make the GUI impossible to close again.
+        if self.workerThread.isRunning():
+            print("工作线程未在 3 秒内停止，正在强制结束...")
+            self.workerThread.terminate()
+            self.workerThread.wait(1000)
+
+        self.workerThread = None
+        self.startBtn.setText("启动")
+        self.set_status(False)
+
+    def closeEvent(self, event):
+        self.stop_worker_thread()
+        event.accept()
+
+    @staticmethod
+    def display_cards(cards):
+        if not cards:
+            return cards
+        display_map = {"D": "大王", "X": "小王", "T": "10"}
+        return " ".join(display_map.get(card, card) for card in cards)
 
     def handle_card_recorder_update(self, result):
         font = QtGui.QFont("微软雅黑", 10, QtGui.QFont.Bold)
@@ -116,12 +152,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self.threeCardsLabel.setText('---')
             return
         
-        self.threeCardsLabel.setText(result)
+        self.threeCardsLabel.setText(self.display_cards(result))
 
     def handle_my_position_update(self, result):
         if len(result) == 0:
+            self.currentMyPosition = None
             self.myPositionLabel.setText('---')
+            self._refresh_inference_side_labels()
+            self._refresh_suggestion_side_headers()
             return
+
+        self.currentMyPosition = result
         
         posotionTextMap = {
             'landlord_up': '农民（地主上家）',
@@ -130,44 +171,130 @@ class MainWindow(QtWidgets.QMainWindow):
         }
 
         self.myPositionLabel.setText(posotionTextMap[result])
+        self._refresh_inference_side_labels()
+        self._refresh_suggestion_side_headers()
 
     def handle_ai_suggestion_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
 
-        if len(result) == 0 or not isinstance(result, list):
-            for i in range(3):
-                emplty_item1 = QtWidgets.QTableWidgetItem('-')
-                emplty_item1.setFont(font_content)
-                emplty_item1.setTextAlignment(QtCore.Qt.AlignCenter)
-                emplty_item2 = QtWidgets.QTableWidgetItem('-')
-                emplty_item2.setFont(font_content)
-                emplty_item2.setTextAlignment(QtCore.Qt.AlignCenter)
-                self.suggestionTable.setItem(i + 1, 0, emplty_item1)
-                self.suggestionTable.setItem(i + 1, 1, emplty_item2)
-            
+        def clear_rows(paused=False):
+            for row in range(1, 4):
+                for col in range(7):
+                    value = (
+                        "状态暂停"
+                        if paused and row == 1 and col == 0
+                        else "-"
+                    )
+                    item = QtWidgets.QTableWidgetItem(value)
+                    item.setFont(font_content)
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    if paused and row == 1 and col == 0:
+                        item.setForeground(QtGui.QColor("#d00000"))
+                        item.setToolTip(
+                            "识别历史与DouZero环境暂时无法一致重建；"
+                            "识牌和概率推断仍在继续"
+                        )
+                    self.suggestionTable.setItem(row, col, item)
+
+        if (
+            isinstance(result, list)
+            and result
+            and isinstance(result[0], (list, tuple))
+            and result[0]
+            and result[0][0] == "__PAUSED__"
+        ):
+            clear_rows(paused=True)
             return
-        
+
+        if not result or not isinstance(result, list):
+            clear_rows()
+            return
+
         for i in range(3):
-            data = result[i] if len(result) > i else ('-', '-')
-            left_item = QtWidgets.QTableWidgetItem(data[0])
-            left_item.setFont(font_content)
-            left_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            left_item.setForeground(QtGui.QColor("#0000FF"))
-            self.suggestionTable.setItem(i + 1, 0, left_item)
+            data = (
+                result[i]
+                if len(result) > i
+                else ("-", "-", "-", "-", "-", "-", "-", None)
+            )
+            action_raw = data[0] if len(data) > 0 else "-"
+            score_text = data[1] if len(data) > 1 else "-"
+            total_text = data[2] if len(data) > 2 else "-"
+            left_ordinary = data[3] if len(data) > 3 else "-"
+            left_bomb = data[4] if len(data) > 4 else "-"
+            right_ordinary = data[5] if len(data) > 5 else "-"
+            right_bomb = data[6] if len(data) > 6 else "-"
+            model_rank = data[7] if len(data) > 7 else None
 
-            right_item = QtWidgets.QTableWidgetItem(data[1])
-            right_item.setFont(font_content)
-            right_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            action_text = action_raw
+            if (
+                isinstance(action_raw, str)
+                and action_raw not in ("-", "Pass")
+            ):
+                action_text = self.display_cards(action_raw)
+            elif action_raw == "Pass":
+                action_text = "不出"
 
-            if data[1] != '-':
-                if float(data[1]) >= 1:
-                    right_item.setForeground(QtGui.QColor("#ff0000"))
-                elif float(data[1]) < 1:
-                    right_item.setForeground(QtGui.QColor("#000000"))
-                elif float(data[1]) < 0.1:
-                    right_item.setForeground(QtGui.QColor("#00FF00"))
+            values = [
+                action_text,
+                score_text,
+                total_text,
+                left_ordinary,
+                left_bomb,
+                right_ordinary,
+                right_bomb,
+            ]
 
-            self.suggestionTable.setItem(i + 1, 1, right_item)
+            for col, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                item.setFont(font_content)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                if col == 0:
+                    item.setForeground(QtGui.QColor("#0066cc"))
+                    if model_rank is not None:
+                        item.setToolTip(
+                            f"DouZero原模型第 {model_rank} 候选"
+                        )
+                elif col == 1:
+                    item.setToolTip(
+                        "DouZero原始候选模型分；不是校准后的胜率"
+                    )
+                    if model_rank == 1:
+                        item.setForeground(QtGui.QColor("#0066cc"))
+                else:
+                    tooltips = {
+                        2: "真正敌方至少一人存在合法压制手段的后验概率；不是胜率",
+                        3: "左侧玩家无需炸弹即可压住的后验概率",
+                        4: "左侧玩家只有动用炸弹或王炸才能压住的后验概率",
+                        5: "右侧玩家无需炸弹即可压住的后验概率",
+                        6: "右侧玩家只有动用炸弹或王炸才能压住的后验概率",
+                    }
+                    item.setToolTip(tooltips[col])
+
+                    if isinstance(value, str) and value.endswith("%"):
+                        try:
+                            p = float(value[:-1]) / 100.0
+                            if col in (2, 3, 5):
+                                if p >= 0.75:
+                                    item.setForeground(
+                                        QtGui.QColor("#d00000")
+                                    )
+                                elif p >= 0.50:
+                                    item.setForeground(
+                                        QtGui.QColor("#c26b00")
+                                    )
+                                elif p <= 0.20:
+                                    item.setForeground(
+                                        QtGui.QColor("#008000")
+                                    )
+                            elif col in (4, 6) and p >= 0.10:
+                                item.setForeground(
+                                    QtGui.QColor("#7a3db8")
+                                )
+                        except ValueError:
+                            pass
+
+                self.suggestionTable.setItem(i + 1, col, item)
 
     def handle_bid_win_rate_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
@@ -247,7 +374,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.playedCardsTable.setItem(3, 1, emptyItem3)
             return
 
-        playedCardRightItem = QtWidgets.QTableWidgetItem(result[1])
+        played_text = result[1] if result[1] == "Pass" else self.display_cards(result[1])
+        playedCardRightItem = QtWidgets.QTableWidgetItem(played_text)
         playedCardRightItem.setFont(font_content)
         playedCardRightItem.setTextAlignment(QtCore.Qt.AlignCenter)
         playedCardRightItem.setForeground(QtGui.QColor("#0000FF"))
@@ -258,6 +386,259 @@ class MainWindow(QtWidgets.QMainWindow):
             self.playedCardsTable.setItem(2, 1, playedCardRightItem)
         elif result[0] == 'landlord_down':
             self.playedCardsTable.setItem(3, 1, playedCardRightItem)
+
+    def create_inference_table(self):
+        title_layout = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel("对手手牌推断")
+        title.setFont(QtGui.QFont("微软雅黑", 9, QtGui.QFont.Bold))
+        title_layout.addWidget(title)
+        title_layout.addStretch()
+
+        self.inferenceMetaLabel = QtWidgets.QLabel("样本 - · Pass - · 状态等待")
+        self.inferenceMetaLabel.setFont(QtGui.QFont("微软雅黑", 8))
+        title_layout.addWidget(self.inferenceMetaLabel)
+        self.main_layout.addLayout(title_layout)
+
+        self.inferenceTable = QtWidgets.QTableWidget(self)
+        self.inferenceTable.setRowCount(3)
+        self.inferenceTable.setColumnCount(9)
+        self.inferenceTable.verticalHeader().setVisible(False)
+        self.inferenceTable.horizontalHeader().setVisible(False)
+        self.inferenceTable.setShowGrid(False)
+        self.inferenceTable.setFixedHeight(98)
+        self.inferenceTable.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.inferenceTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self.inferenceTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.inferenceTable.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+
+        headers = ["对手", "剩余", "大王", "小王", "2", "A", "K", "炸弹", "王炸"]
+        widths = [145, 58, 67, 67, 55, 55, 55, 76, 76]
+        for col, (header, width) in enumerate(zip(headers, widths)):
+            self.inferenceTable.setColumnWidth(col, width)
+            item = QtWidgets.QTableWidgetItem(header)
+            item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.inferenceTable.setItem(0, col, item)
+
+        for row, side in ((1, "左侧"), (2, "右侧")):
+            self.inferenceTable.setRowHeight(row, 30)
+            name_item = QtWidgets.QTableWidgetItem(side)
+            name_item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            name_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.inferenceTable.setItem(row, 0, name_item)
+            for col in range(1, 9):
+                item = QtWidgets.QTableWidgetItem("-")
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.inferenceTable.setItem(row, col, item)
+
+        self.main_layout.addWidget(self.inferenceTable)
+
+        self.inferenceRiskLabel = QtWidgets.QLabel("重点牌型：等待牌局状态")
+        self.inferenceRiskLabel.setFont(QtGui.QFont("微软雅黑", 8))
+        self.inferenceRiskLabel.setWordWrap(True)
+        self.inferenceRiskLabel.setToolTip(
+            "显示更适合实战关注的组合概率：对2、三A、炸弹、王炸等。"
+            "这些是隐藏手牌后验概率，不是对手一定会持有或一定会出的结论。"
+        )
+        self.main_layout.addWidget(self.inferenceRiskLabel)
+
+    def _side_position_map(self):
+        mapping = {
+            "landlord": {"left": "landlord_up", "right": "landlord_down"},
+            "landlord_up": {"left": "landlord_down", "right": "landlord"},
+            "landlord_down": {"left": "landlord", "right": "landlord_up"},
+        }
+        return mapping.get(self.currentMyPosition, {})
+
+    @staticmethod
+    def _position_display_name(position):
+        return {
+            "landlord": "地主",
+            "landlord_up": "农民",
+            "landlord_down": "农民",
+        }.get(position, "-")
+
+    def _refresh_inference_side_labels(self):
+        if not hasattr(self, "inferenceTable"):
+            return
+        side_map = self._side_position_map()
+        for row, side_key, side_text in (
+            (1, "left", "左侧"),
+            (2, "right", "右侧"),
+        ):
+            position = side_map.get(side_key)
+            role = self._position_display_name(position)
+            text = side_text if role == "-" else f"{side_text}（{role}）"
+            item = QtWidgets.QTableWidgetItem(text)
+            item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.inferenceTable.setItem(row, 0, item)
+
+    def handle_remaining_count_update(self, result):
+        if not isinstance(result, dict):
+            return
+        self.observedRemainingCounts.update(result)
+        self._render_remaining_counts()
+
+    def _render_remaining_counts(self):
+        side_map = self._side_position_map()
+        for row, side_key in ((1, "left"), (2, "right")):
+            position = side_map.get(side_key)
+            info = self.observedRemainingCounts.get(position, {}) if position else {}
+            count = info.get("count") if isinstance(info, dict) else None
+            if count is None:
+                continue
+
+            value = f"{count}实" if info.get("observed") else str(count)
+            if info.get("desync"):
+                value = f"{count}!"
+
+            item = QtWidgets.QTableWidgetItem(value)
+            item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
+            if info.get("desync"):
+                item.setForeground(QtGui.QColor("#ff0000"))
+                item.setToolTip("画面剩余张数与动作历史尚未完成匹配")
+            elif info.get("observed"):
+                item.setForeground(QtGui.QColor("#0066cc"))
+                item.setToolTip("微信画面确认的剩余张数")
+            self.inferenceTable.setItem(row, 1, item)
+
+    def handle_hand_inference_update(self, result):
+        if not result or not result.get("players"):
+            self.inferenceMetaLabel.setText("样本 - · Pass - · 状态等待")
+            self.inferenceRiskLabel.setText("重点牌型：等待牌局状态")
+            for row in (1, 2):
+                for col in range(1, 9):
+                    item = QtWidgets.QTableWidgetItem("-")
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    self.inferenceTable.setItem(row, col, item)
+            return
+
+        desync = any(
+            isinstance(info, dict) and info.get("desync")
+            for info in self.observedRemainingCounts.values()
+        )
+        status = "状态需校验" if desync else "状态正常"
+        ess_ratio = result.get("effective_sample_ratio")
+        ess_text = "-" if ess_ratio is None else f"{ess_ratio:.0%}"
+        if ess_ratio is None:
+            sample_quality = "-"
+        elif ess_ratio >= 0.65:
+            sample_quality = "高"
+        elif ess_ratio >= 0.40:
+            sample_quality = "中"
+        else:
+            sample_quality = "低"
+        self.inferenceMetaLabel.setText(
+            f"行为证据 {result.get('play_evidence_count', 0)}+{result.get('pass_evidence_count', 0)} · "
+            f"ESS {ess_text} · 样本质量 {sample_quality} · {status}"
+        )
+        self.inferenceMetaLabel.setToolTip(
+            "行为证据=已记录的实际出牌数+Pass数。\n"
+            "ESS=有效样本比例，衡量蒙特卡洛权重是否集中在少数隐藏手牌。\n"
+            "“样本质量”只描述采样稳定性，不是预测准确率，也不是胜率。"
+        )
+
+        self._refresh_inference_side_labels()
+        side_map = self._side_position_map()
+        players = result.get("players", {})
+
+        for row, side_key in ((1, "left"), (2, "right")):
+            position = side_map.get(side_key)
+            data = players.get(position) if position else None
+            if not data:
+                for col in range(1, 9):
+                    item = QtWidgets.QTableWidgetItem("-")
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    self.inferenceTable.setItem(row, col, item)
+                continue
+
+            observed_info = self.observedRemainingCounts.get(position, {})
+            observed_count = observed_info.get("count")
+            if observed_count is not None:
+                remaining_text = (
+                    f"{observed_count}!"
+                    if observed_info.get("desync")
+                    else f"{observed_count}实"
+                )
+            else:
+                remaining_text = str(data.get("remaining_count", "-"))
+
+            values = [
+                remaining_text,
+                self._format_inference_probability(data, "D"),
+                self._format_inference_probability(data, "X"),
+                self._format_inference_probability(data, "2"),
+                self._format_inference_probability(data, "A"),
+                self._format_inference_probability(data, "K"),
+                f"{data.get('any_bomb', 0):.0%}",
+                f"{data.get('rocket', 0):.0%}",
+            ]
+
+            for col, value in enumerate(values, start=1):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setFont(QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold))
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+
+                if col == 1 and value.endswith("!"):
+                    item.setForeground(QtGui.QColor("#ff0000"))
+                elif col == 1 and value.endswith("实"):
+                    item.setForeground(QtGui.QColor("#0066cc"))
+                elif col >= 2 and value.endswith("%"):
+                    try:
+                        p = float(value[:-1]) / 100.0
+                        if p >= 0.75:
+                            item.setForeground(QtGui.QColor("#d00000"))
+                        elif p >= 0.50:
+                            item.setForeground(QtGui.QColor("#c26b00"))
+                        elif p <= 0.10:
+                            item.setForeground(QtGui.QColor("#808080"))
+                    except ValueError:
+                        pass
+
+                    card_by_col = {2: "D", 3: "X", 4: "2", 5: "A", 6: "K"}
+                    card = card_by_col.get(col)
+                    if card:
+                        stats = data.get("cards", {}).get(card, {})
+                        card_name = {"D": "大王", "X": "小王"}.get(card, card)
+                        item.setToolTip(
+                            f"{card_name}：至少1张 {stats.get('one_plus', 0):.0%}\n"
+                            f"至少对子 {stats.get('pair_plus', 0):.0%}\n"
+                            f"至少三张 {stats.get('triple_plus', 0):.0%}\n"
+                            f"四张炸弹 {stats.get('bomb', 0):.0%}"
+                        )
+                self.inferenceTable.setItem(row, col, item)
+
+        self._render_remaining_counts()
+
+        risk_parts = []
+        for side_key, side_text in (("left", "左"), ("right", "右")):
+            position = side_map.get(side_key)
+            data = players.get(position) if position else None
+            if not data:
+                continue
+            risks = data.get("combo_risks", {})
+            pair_2 = risks.get("pair_2", 0.0)
+            triple_a = risks.get("triple_A", 0.0)
+            any_bomb = risks.get("any_bomb", data.get("any_bomb", 0.0))
+            rocket = risks.get("rocket", data.get("rocket", 0.0))
+            risk_parts.append(
+                f"{side_text}: 对2 {pair_2:.0%} · 三A {triple_a:.0%} · "
+                f"炸弹 {any_bomb:.0%} · 王炸 {rocket:.0%}"
+            )
+        self.inferenceRiskLabel.setText(
+            "重点牌型  " + ("   |   ".join(risk_parts) if risk_parts else "等待牌局状态")
+        )
+
+    @staticmethod
+    def _format_inference_probability(player_data, card):
+        probability = (
+            player_data.get("cards", {})
+            .get(card, {})
+            .get("one_plus", 0)
+        )
+        return f"{probability:.0%}"
 
     def create_comboBox(self):
         combo_layout = QtWidgets.QHBoxLayout()
@@ -521,10 +902,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def create_suggestion_table(self):
         self.suggestionTable = QtWidgets.QTableWidget(self)
-        self.suggestionTable.setGeometry(0, 209, 266, 150)
-        self.suggestionTable.setFixedSize(266, 150)
+        self.suggestionTable.setGeometry(0, 209, 430, 150)
+        self.suggestionTable.setFixedSize(430, 150)
         self.suggestionTable.setRowCount(4)
-        self.suggestionTable.setColumnCount(2)
+        self.suggestionTable.setColumnCount(7)
 
         self.suggestionTable.verticalHeader().setVisible(False)
         self.suggestionTable.horizontalHeader().setVisible(False)
@@ -533,14 +914,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(4):
             self.suggestionTable.setRowHeight(row, 33)
 
-        self.suggestionTable.setColumnWidth(0, 168)
-        self.suggestionTable.setColumnWidth(1, 94)
+        widths = [104, 52, 56, 54, 54, 54, 54]
+        for col, width in enumerate(widths):
+            self.suggestionTable.setColumnWidth(col, width)
 
-        headers = ['AI 建议出牌', '胜率']
+        headers = ['候选', '模型分', '敌总压', '左普', '左炸', '右普', '右炸']
         contents = [
-            ('-', '-'),
-            ('-', '-'),
-            ('-', '-')
+            ('-', '-', '-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-', '-', '-'),
+            ('-', '-', '-', '-', '-', '-', '-'),
         ]
 
         font_header = QtGui.QFont("微软雅黑", 8)
@@ -552,32 +934,80 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.suggestionTable.setItem(0, col, item)
 
-        for row, (left, right) in enumerate(contents, start=1):
-            left_item = QtWidgets.QTableWidgetItem(left)
-            left_item.setFont(font_content)
-            left_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            self.suggestionTable.setItem(row, 0, left_item)
+        for row, values in enumerate(contents, start=1):
+            for col, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setFont(font_content)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.suggestionTable.setItem(row, col, item)
 
-            right_item = QtWidgets.QTableWidgetItem(right)
-            right_item.setFont(font_content)
-            right_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            self.suggestionTable.setItem(row, 1, right_item)
-
-        self.suggestionTable.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.suggestionTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.suggestionTable.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.suggestionTable.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-
+        self.suggestionTable.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOff
+        )
+        self.suggestionTable.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarAlwaysOff
+        )
+        self.suggestionTable.setEditTriggers(
+            QtWidgets.QAbstractItemView.NoEditTriggers
+        )
+        self.suggestionTable.setSelectionMode(
+            QtWidgets.QAbstractItemView.NoSelection
+        )
         self.suggestionTable.setStyleSheet("""
-            QTableWidget::item {
-                background-color: #F3F3F3;
-            }
-            QTableWidget::item:alternate {
-                background-color: #E3E3E3;
-            }
+            QTableWidget::item { background-color: #F3F3F3; }
+            QTableWidget::item:alternate { background-color: #E3E3E3; }
         """)
-
         self.suggestionTable.setAlternatingRowColors(True)
+        self._refresh_suggestion_side_headers()
+
+    def _refresh_suggestion_side_headers(self):
+        if not hasattr(self, "suggestionTable"):
+            return
+
+        positions = ['landlord_up', 'landlord', 'landlord_down']
+        mine = getattr(self, "currentMyPosition", None)
+
+        left_relation = ""
+        right_relation = ""
+        if mine in positions:
+            code = positions.index(mine)
+            right = positions[(code + 1) % 3]
+            left = positions[(code + 2) % 3]
+
+            def relation(other):
+                if mine == 'landlord':
+                    return '敌'
+                return '敌' if other == 'landlord' else '友'
+
+            left_relation = relation(left)
+            right_relation = relation(right)
+
+        labels = [
+            '候选',
+            '模型分',
+            '敌总压',
+            f'左{left_relation}普' if left_relation else '左普',
+            f'左{left_relation}炸' if left_relation else '左炸',
+            f'右{right_relation}普' if right_relation else '右普',
+            f'右{right_relation}炸' if right_relation else '右炸',
+        ]
+        tips = [
+            'DouZero候选动作',
+            'DouZero原始模型分；不是胜率',
+            '真正敌方至少一人能压住的后验概率',
+            '左侧玩家无需炸弹即可压住的概率',
+            '左侧玩家只有使用炸弹/王炸才能压住的概率',
+            '右侧玩家无需炸弹即可压住的概率',
+            '右侧玩家只有使用炸弹/王炸才能压住的概率',
+        ]
+        for col, label in enumerate(labels):
+            item = self.suggestionTable.item(0, col)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                self.suggestionTable.setItem(0, col, item)
+            item.setText(label)
+            item.setToolTip(tips[col])
+            item.setTextAlignment(QtCore.Qt.AlignCenter)
 
     def create_played_card_table(self):
         self.playedCardsTable = QtWidgets.QTableWidget(self)
@@ -647,9 +1077,12 @@ class MainWindow(QtWidgets.QMainWindow):
         font = QtGui.QFont("微软雅黑", 9)
 
         self.cbMode = QtWidgets.QComboBox()
-        self.cbMode.addItem("全自动模式", AutomaticModeEnum.FULL.value)
-        self.cbMode.addItem("半自动模式", AutomaticModeEnum.SEMI.value)
-        self.cbMode.addItem("手动模式", AutomaticModeEnum.MANUAL.value)
+        if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
+            self.cbMode.addItem("微信只读模式", AutomaticModeEnum.MANUAL.value)
+        else:
+            self.cbMode.addItem("全自动模式", AutomaticModeEnum.FULL.value)
+            self.cbMode.addItem("半自动模式", AutomaticModeEnum.SEMI.value)
+            self.cbMode.addItem("手动模式", AutomaticModeEnum.MANUAL.value)
         self.cbMode.setFont(font)
         self.cbMode.setFixedWidth(140)
         self.cbMode.setFixedHeight(40)

@@ -147,9 +147,11 @@ class GameEnv(object):
         return False
 
     def step(self, position, action=None, update=True):
-        # print(f"GameEnv step() 被调用, position = {position}, action = {action}, update = {update}")
-        if action is not None and len(action) > 0:
-            action_list = [[action, 0]]
+        # action=None means "ask the model for an action".
+        # action=[] is an explicit observed Pass and must never invoke the model.
+        if action is not None:
+            action = list(action)
+            action_list = [[action, 0]] if len(action) > 0 else []
             win_rate = 0
         else:
             action = []

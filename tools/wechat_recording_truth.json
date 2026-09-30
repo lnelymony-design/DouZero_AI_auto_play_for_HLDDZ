@@ -1,0 +1,45 @@
+{
+  "format": "wechat_recording_truth_v1",
+  "note": "Verified manually from settlement frames. Physical sides are relative to the local player. Card symbols use internal encoding: D=big joker, X=small joker, T=10.",
+  "recordings": {
+    "腾讯欢乐斗地主 2026-09-30 17-49-40.mp4": {
+      "my_position_code": 2,
+      "final_remaining": {
+        "left": 4,
+        "right": 10,
+        "me": 0
+      },
+      "final_hands": {
+        "left": "22K6",
+        "right": "X22JJ99965",
+        "me": ""
+      }
+    },
+    "腾讯欢乐斗地主 2026-09-30 17-51-11.mp4": {
+      "my_position_code": 1,
+      "final_remaining": {
+        "left": 8,
+        "right": 15,
+        "me": 0
+      },
+      "final_hands": {
+        "left": "2AAAQQ94",
+        "right": "KKJTT8866554333",
+        "me": ""
+      }
+    },
+    "腾讯欢乐斗地主 2026-09-30 17-52-54.mp4": {
+      "my_position_code": 2,
+      "final_remaining": {
+        "left": 3,
+        "right": 0,
+        "me": 2
+      },
+      "final_hands": {
+        "left": "AJJ",
+        "right": "",
+        "me": "KQ"
+      }
+    }
+  }
+}

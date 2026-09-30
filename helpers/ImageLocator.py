@@ -31,6 +31,8 @@ class ImageLocator:
     async def get_resize_scale(self, image=None):
         if image is None:
             screenshot, _ = await self.screenHelper.getScreenshot()
+            if screenshot is None:
+                return None
             image = np.asarray(screenshot)
 
         window_w, window_h = image.shape[1], image.shape[0]
@@ -137,8 +139,15 @@ class ImageLocator:
             # print('screenshot: ', screenshot)
             # print('position: ', _)
         
+        if screenshot is None:
+            return None
+
+        image_array = np.asarray(screenshot)
+        if image_array.ndim < 3:
+            return None
+
         # 将 PIL 格式图像转换为 OpenCV 格式（BGR）
-        img = cv2.cvtColor(np.asarray(screenshot), cv2.COLOR_RGB2BGR)
+        img = cv2.cvtColor(image_array, cv2.COLOR_RGB2BGR)
 
         # 调用 LocateOnImage 函数在图像中查找模板图像的位置
         result = await self.locate_first_match_on_image(image=img, templateName=templateName, region=region, scale=scale, confidence=confidence)
