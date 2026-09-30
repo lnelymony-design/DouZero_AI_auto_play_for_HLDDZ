@@ -50,5 +50,12 @@
     "mingpai_threshold": 0.99,
     "platform": "wechat_miniapp",
     "window_title": "腾讯欢乐斗地主",
-    "resize_window": false
+    "resize_window": false,
+    "inference_sample_count": 1600,
+    "inference_pass_penalty": 0.62,
+    "inference_friendly_pass_penalty": 0.86,
+    "inference_play_behavior_floor": 0.18,
+    "inference_play_behavior_strength": 1,
+    "inference_behavior_temperature": 0.75,
+    "inference_min_effective_sample_ratio": 0.28
 }
