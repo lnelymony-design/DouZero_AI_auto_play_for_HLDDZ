@@ -101,6 +101,17 @@ def evaluate(
                 "raw_pass": bool(raw and raw[0] == "Pass"),
                 "ess": inf_result.get("effective_sample_ratio", 0.0),
                 "adj": {},
+                "triplets": [
+                    {
+                        "action": action,
+                        "score": float(score),
+                        "risk": risk,
+                        "truth": truth_map.get(action),
+                        "rank": rank,
+                    }
+                    for rank, (action, score, risk)
+                    in enumerate(triplets, start=1)
+                ],
             }
             for weight in weights:
                 ranked = adjust_candidates(triplets, weight=weight)
@@ -248,6 +259,69 @@ def main():
             f"nonpass={len(vals)} pass={passes} "
             f"beatable={pct(rate(vals))}"
         )
+
+    print("\n=== TOP-CANDIDATE RISK SEPARATION ===")
+    opportunities = []
+    comparable = 0
+    gains = []
+    for decision_index, row in enumerate(all_decisions):
+        items = row.get("triplets", [])
+        if not items or items[0].get("risk") is None:
+            continue
+        raw_item = items[0]
+        numeric = [
+            x for x in items[1:]
+            if x.get("risk") is not None
+        ]
+        if not numeric:
+            continue
+        comparable += 1
+        best = min(numeric, key=lambda x: x["risk"])
+        gain = raw_item["risk"] - best["risk"]
+        gains.append(gain)
+
+        scores = [x["score"] for x in items]
+        span = max(scores) - min(scores) if scores else 0.0
+        gap = raw_item["score"] - best["score"]
+        gap_fraction = 0.0 if span <= 1e-12 else gap / span
+        opportunities.append({
+            "decision": decision_index,
+            "raw": raw_item,
+            "alt": best,
+            "gain": gain,
+            "gap_fraction": gap_fraction,
+        })
+
+    if gains:
+        print(f"comparable decisions={comparable}")
+        print(
+            f"risk gain mean={mean(gains):.1%} "
+            f"max={max(gains):.1%}"
+        )
+        for threshold in (0.01, 0.03, 0.05, 0.10, 0.15):
+            count = sum(g >= threshold for g in gains)
+            print(
+                f"gain >= {threshold:.0%}: "
+                f"{count}/{len(gains)}"
+            )
+        print("largest candidate separations:")
+        for item in sorted(
+            opportunities, key=lambda x: x["gain"], reverse=True
+        )[:10]:
+            raw_item = item["raw"]
+            alt_item = item["alt"]
+            print(
+                f"  D{item['decision']}: "
+                f"raw {raw_item['action']} risk={raw_item['risk']:.1%} "
+                f"truth={raw_item['truth']} score={raw_item['score']:.3f} -> "
+                f"M{alt_item['rank']} {alt_item['action']} "
+                f"risk={alt_item['risk']:.1%} truth={alt_item['truth']} "
+                f"score={alt_item['score']:.3f}; "
+                f"gain={item['gain']:.1%}, "
+                f"gap={item['gap_fraction']:.1%}"
+            )
+    else:
+        print("no comparable non-pass top decisions")
 
     print("\n=== SAFER ALTERNATIVE TRUTH GRID ===")
     print(
