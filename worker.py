@@ -26,6 +26,7 @@ from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticM
 from utils import remove_chars_from_string
 from inference import HandInferenceEngine
 from inference.decision_policy import choose_recommendation
+from inference.rollout import PosteriorRolloutEvaluator
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -119,6 +120,11 @@ class WorkerThread(QThread):
             'landlord_up': "baselines/resnet/resnet_landlord_up.ckpt",
             'landlord_down': "baselines/resnet/resnet_landlord_down.ckpt"
         }
+        self.ai_agent_cache = {}
+        self.rollout_evaluator = None
+        self.rollout_init_failed = False
+        self.last_rollout_key = None
+        self.last_rollout_result = None
 
         LandlordModel.init_model("baselines/resnet/resnet_landlord.ckpt")
 
@@ -348,6 +354,58 @@ class WorkerThread(QThread):
                 }
                 raw_top_action, raw_top_score = raw_actions[0]
 
+                rollout_result = None
+                rollout_key = (
+                    tuple(douzero_history),
+                    tuple(action for action, _ in raw_actions[:3]),
+                    round(ess_ratio, 4),
+                )
+                if (
+                    self.rollout_evaluator is not None
+                    and self.hand_inference is not None
+                    and ess_ratio >= self.config.rollout_min_ess_ratio
+                ):
+                    if self.last_rollout_key == rollout_key:
+                        rollout_result = self.last_rollout_result
+                    else:
+                        try:
+                            rollout_result = self.rollout_evaluator.evaluate(
+                                public_env=self.env,
+                                hand_inference=self.hand_inference,
+                                candidates=[
+                                    action for action, _ in raw_actions[:3]
+                                ],
+                                my_position=self.my_position,
+                            )
+                            self.last_rollout_key = rollout_key
+                            self.last_rollout_result = rollout_result
+                        except Exception as rollout_exc:
+                            print(f"后验Rollout计算失败: {rollout_exc}")
+                            rollout_result = None
+
+                if rollout_result:
+                    parts = []
+                    for item in rollout_result.get("candidates", []):
+                        action = item["action"]
+                        shown_action = (
+                            "不出"
+                            if action == "Pass"
+                            else display_cards(action)
+                        )
+                        parts.append(
+                            f"{shown_action}:整局值"
+                            f"{item['rollout_value']:.0%}/"
+                            f"终局{item['terminal_ratio']:.0%}/"
+                            f"控权{item['control_share']:.0%}"
+                        )
+                    if parts:
+                        print(
+                            "走向评估 >>> "
+                            + " | ".join(parts)
+                            + f" [世界{rollout_result['worlds_completed']}，"
+                            f"{rollout_result['elapsed_seconds']:.2f}s]"
+                        )
+
                 # game_new may deliberately replace the raw network top action
                 # with a deterministic direct-finish / finish-path action.  The
                 # old WeChat display discarded that choice by rebuilding the UI
@@ -529,6 +587,39 @@ class WorkerThread(QThread):
                     decision.action if decision is not None
                     else raw_top_action
                 )
+                rollout_override = False
+                rollout_gain = None
+                if (
+                    rollout_result
+                    and not self.config.rollout_shadow_mode
+                    and (
+                        decision is None
+                        or decision.source != "env_override"
+                    )
+                ):
+                    rollout_items = {
+                        item["action"]: item
+                        for item in rollout_result.get("candidates", [])
+                    }
+                    best_rollout = (
+                        rollout_result.get("candidates", [None])[0]
+                        if rollout_result.get("candidates")
+                        else None
+                    )
+                    raw_rollout = rollout_items.get(raw_top_action)
+                    if best_rollout is not None and raw_rollout is not None:
+                        rollout_gain = (
+                            best_rollout["rollout_value"]
+                            - raw_rollout["rollout_value"]
+                        )
+                        if (
+                            best_rollout["action"] != raw_top_action
+                            and rollout_gain
+                            >= self.config.rollout_min_value_gain
+                            and best_rollout["terminal_ratio"] >= 0.80
+                        ):
+                            final_action = best_rollout["action"]
+                            rollout_override = True
 
                 # Ensure the final action is present in the display set.
                 if final_action not in enriched_by_action:
@@ -599,9 +690,16 @@ class WorkerThread(QThread):
                     source_text = {
                         "env_override": "直接出完/路径",
                         "belief_safer": "推牌风险修正",
+                        "rollout": "后验整局模拟",
                         "douzero": "DouZero",
                     }.get(
-                        decision.source if decision is not None else "douzero",
+                        "rollout"
+                        if rollout_override
+                        else (
+                            decision.source
+                            if decision is not None
+                            else "douzero"
+                        ),
                         "DouZero",
                     )
                     print(
@@ -635,10 +733,28 @@ class WorkerThread(QThread):
                         and decision.source == "belief_safer"
                     ),
                     "decision_source": (
-                        decision.source if decision is not None else "douzero"
+                        "rollout"
+                        if rollout_override
+                        else (
+                            decision.source
+                            if decision is not None
+                            else "douzero"
+                        )
                     ),
                     "decision_reason": (
-                        decision.reason if decision is not None else ""
+                        (
+                            f"后验整局值提升 {rollout_gain:.3f}"
+                            if rollout_override and rollout_gain is not None
+                            else (
+                                decision.reason
+                                if decision is not None
+                                else ""
+                            )
+                        )
+                    ),
+                    "rollout": rollout_result,
+                    "rollout_shadow_mode": bool(
+                        self.config.rollout_shadow_mode
                     ),
                     "env_selected": {
                         "action": env_selected_action,
@@ -852,6 +968,8 @@ class WorkerThread(QThread):
             douzero_paused_reason = None
             self.env = None
             self.hand_inference = None
+            self.last_rollout_key = None
+            self.last_rollout_result = None
             self.my_position_code = None
             self.my_position = ""
             self.action_list = []
@@ -911,6 +1029,7 @@ class WorkerThread(QThread):
                 self.initOtherPlayerHandCards()
                 self.initAllPlayerCardData()
                 self.create_ai_representer()
+                self._ensure_rollout_evaluator()
                 douzero_players = self.env.players
                 douzero_initial_data = {
                     key: list(value)
@@ -2322,10 +2441,50 @@ class WorkerThread(QThread):
     def update_player_bidding_status(self, round_num):
         self.player_bidding_status[round_num] = [self.my_bidding_status, self.right_bidding_status, self.left_bidding_status]
     
+    def _get_cached_agent(self, position):
+        agent = self.ai_agent_cache.get(position)
+        if agent is None:
+            agent = DeepAgent(position, self.model_path_dict[position])
+            self.ai_agent_cache[position] = agent
+        return agent
+
+    def _ensure_rollout_evaluator(self):
+        if not getattr(self.config, "rollout_enabled", False):
+            return None
+        if self.rollout_evaluator is not None:
+            return self.rollout_evaluator
+        if self.rollout_init_failed:
+            return None
+
+        try:
+            agents = {
+                position: self._get_cached_agent(position)
+                for position in PlayerPosition
+            }
+            self.rollout_evaluator = PosteriorRolloutEvaluator(
+                agents=agents,
+                max_worlds=self.config.rollout_max_worlds,
+                min_worlds=self.config.rollout_min_worlds,
+                max_steps=self.config.rollout_max_steps,
+                time_budget_seconds=self.config.rollout_time_budget_seconds,
+            )
+            print(
+                "后验Rollout已初始化 >>> "
+                f"worlds<={self.config.rollout_max_worlds} "
+                f"budget={self.config.rollout_time_budget_seconds:.1f}s "
+                f"shadow={self.config.rollout_shadow_mode}"
+            )
+            return self.rollout_evaluator
+        except Exception as exc:
+            self.rollout_init_failed = True
+            self.rollout_evaluator = None
+            print(f"后验Rollout初始化失败，自动降级为DouZero: {exc}")
+            return None
+
     def create_ai_representer(self):
         AI = [0, 0]
         AI[0] = self.my_position
-        AI[1] = DeepAgent(self.my_position, self.model_path_dict[self.my_position])
+        AI[1] = self._get_cached_agent(self.my_position)
         self.env = GameEnv(AI)
 
     def reset_ai_env(self):
