@@ -24,7 +24,7 @@ from douzero.evaluation.deep_agent_new import DeepAgent
 
 from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticModeEnum
 from utils import remove_chars_from_string
-from inference import HandInferenceEngine
+from inference import HandInferenceEngine, adjust_candidates
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -324,40 +324,109 @@ class WorkerThread(QThread):
                 )
                 self.action_message = action_message
 
-                top_actions = action_list[:3]
-                enriched_actions = []
-                for action_text, score_text in top_actions:
+                candidate_pool = action_list[:6]
+                candidate_triplets = []
+                for action_text, score_text in candidate_pool:
                     risk = None
                     if self.hand_inference is not None and action_text != "Pass":
                         try:
                             risk = self.hand_inference.response_risk(action_text)
                         except Exception as risk_exc:
                             print(f"敌方可压概率计算失败: {risk_exc}")
+                    candidate_triplets.append((action_text, score_text, risk))
+
+                inference_result = self.last_hand_inference_result or {}
+                ess_ratio = inference_result.get("effective_sample_ratio", 0.0)
+                adjustment_enabled = (
+                    bool(self.config.risk_adjustment_enabled)
+                    and self.hand_inference is not None
+                    and ess_ratio >= self.config.risk_adjustment_min_ess_ratio
+                    and not any(count_desync.values())
+                )
+
+                adjusted_candidates = []
+                if adjustment_enabled:
+                    adjusted_candidates = adjust_candidates(
+                        candidate_triplets,
+                        weight=self.config.risk_adjustment_weight,
+                    )
+
+                adjusted_by_model_rank = {
+                    item.model_rank: item for item in adjusted_candidates
+                }
+                adjusted_winner = next(
+                    (
+                        item for item in adjusted_candidates
+                        if item.adjusted_rank == 1
+                    ),
+                    None,
+                )
+
+                display_ranks = [1, 2, 3]
+                if (
+                    adjusted_winner is not None
+                    and adjusted_winner.model_rank > 3
+                ):
+                    display_ranks.append(adjusted_winner.model_rank)
+
+                enriched_actions = []
+                for model_rank in display_ranks:
+                    if model_rank > len(candidate_triplets):
+                        continue
+                    action_text, score_text, risk = candidate_triplets[model_rank - 1]
+                    adjusted = adjusted_by_model_rank.get(model_rank)
                     risk_text = "-" if risk is None else f"{risk:.0%}"
-                    enriched_actions.append((action_text, score_text, risk_text))
+                    adjusted_text = (
+                        "-"
+                        if adjusted is None
+                        else f"{adjusted.adjusted_score:.1f}"
+                    )
+                    adjusted_rank = (
+                        None if adjusted is None else adjusted.adjusted_rank
+                    )
+                    enriched_actions.append(
+                        (
+                            action_text,
+                            score_text,
+                            risk_text,
+                            adjusted_text,
+                            model_rank,
+                            adjusted_rank,
+                        )
+                    )
 
                 self.action_list = enriched_actions
                 self.ai_suggestion_signal.emit(self.action_list)
                 douzero_paused_reason = None
 
-                action_text = action_message.get("action", "")
-                primary_risk = None
-                if self.hand_inference is not None and action_text:
-                    try:
-                        primary_risk = self.hand_inference.response_risk(action_text)
-                    except Exception:
-                        primary_risk = None
-                risk_suffix = (
-                    "" if primary_risk is None
-                    else f"，敌方可压 {primary_risk:.0%}"
-                )
-                if action_text:
-                    print(
-                        f"DouZero建议 >>> {display_cards(action_text)} "
-                        f"(模型分 {action_message.get('win_rate', 0):.3f}{risk_suffix})"
+                raw_top = candidate_triplets[0] if candidate_triplets else None
+                if raw_top:
+                    raw_action, raw_score, raw_risk = raw_top
+                    raw_risk_text = (
+                        "-" if raw_risk is None else f"{raw_risk:.0%}"
                     )
-                else:
-                    print("DouZero建议 >>> 不出")
+                    print(
+                        f"DouZero原建议 >>> "
+                        f"{display_cards(raw_action) if raw_action != 'Pass' else '不出'} "
+                        f"(模型分 {raw_score}，敌方可压 {raw_risk_text})"
+                    )
+
+                if adjustment_enabled and adjusted_winner is not None:
+                    changed = adjusted_winner.model_rank != 1
+                    change_text = " [与原建议不同]" if changed else " [与原建议一致]"
+                    print(
+                        f"风险调整建议 >>> "
+                        f"{display_cards(adjusted_winner.action) if adjusted_winner.action != 'Pass' else '不出'} "
+                        f"(原模型第{adjusted_winner.model_rank}，"
+                        f"调分 {adjusted_winner.adjusted_score:.1f}，"
+                        f"λ={self.config.risk_adjustment_weight:.2f})"
+                        f"{change_text}"
+                    )
+                elif self.config.risk_adjustment_enabled:
+                    print(
+                        f"风险调整暂停 >>> ESS {ess_ratio:.0%} "
+                        f"< 阈值 {self.config.risk_adjustment_min_ess_ratio:.0%}"
+                    )
             except Exception as exc:
                 pause_douzero(f"建议计算失败：{exc}")
 
