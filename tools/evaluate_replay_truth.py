@@ -47,16 +47,32 @@ def actual_response(events, index, code, final_hands, action):
     return False
 
 
-def evaluate(replay, truth, weights, samples, max_candidates):
+def evaluate(
+    replay, truth, weights, samples, max_candidates, behavior_mode
+):
     code = replay["position_code"]
     mine = POSITIONS[code]
     events = replay["events"]
     env = init_env(code, replay["my_hand"], replay["bottom_cards"])
+    behavior_kwargs = {}
+    if behavior_mode == "uniform":
+        behavior_kwargs = {
+            "pass_penalty": 1.0,
+            "friendly_pass_penalty": 1.0,
+            "play_behavior_strength": 0.0,
+        }
+    elif behavior_mode == "pass":
+        behavior_kwargs = {
+            "pass_penalty": 0.62,
+            "friendly_pass_penalty": 0.86,
+            "play_behavior_strength": 0.0,
+        }
     inf = HandInferenceEngine(
         my_position=mine,
         my_hand_cards=replay["my_hand"],
         three_landlord_cards=replay["bottom_cards"],
         sample_count=samples,
+        **behavior_kwargs,
     )
     candidates = []
     decisions = []
@@ -129,6 +145,11 @@ def main():
     )
     p.add_argument("--samples", type=int, default=1600)
     p.add_argument("--max-candidates", type=int, default=3)
+    p.add_argument(
+        "--behavior-mode",
+        choices=["uniform", "pass", "full"],
+        default="full",
+    )
     args = p.parse_args()
 
     truths = load_truth(args.truth_file)
@@ -141,7 +162,7 @@ def main():
             continue
         cand, dec = evaluate(
             replay, truth, args.weights, args.samples,
-            max(1, args.max_candidates),
+            max(1, args.max_candidates), args.behavior_mode,
         )
         all_candidates += cand
         all_decisions += dec
@@ -157,7 +178,7 @@ def main():
     brier = mean((pred - float(truth)) ** 2 for pred, truth in all_candidates)
     predicted = mean(pred for pred, _ in all_candidates)
     observed = mean(float(truth) for _, truth in all_candidates)
-    print("\n=== RESPONSE RISK TRUTH CHECK ===")
+    print(f"\n=== RESPONSE RISK TRUTH CHECK [{args.behavior_mode}] ===")
     print(f"candidate_n={len(all_candidates)}")
     print(f"Brier={brier:.4f}")
     print(f"predicted_mean={predicted:.1%}")
