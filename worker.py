@@ -164,9 +164,10 @@ class WorkerThread(QThread):
             print()
 
     async def run_wechat_probe(self):
-        """Read-only WeChat recognizer probe using miniapp-specific glyph models."""
-        print("微信小程序专用识别模式已启动")
-        print("当前阶段：手牌 / 底牌 / 地主位置 / 出牌 / 不出；不会自动点击游戏")
+        """Run the WeChat miniapp as a read-only live state/inference pipeline."""
+        print("微信小程序牌局接入模式已启动")
+        print("识牌结果将实时写入：记牌器 / 出牌历史 / Pass历史 / 对手手牌概率")
+        print("当前仍为只读模式，不会自动点击游戏")
         print()
 
         recognizer = self.wechatRecognizer or WechatCardRecognizer()
@@ -176,9 +177,6 @@ class WorkerThread(QThread):
             "my_hand": None,
             "three_cards": None,
             "position_code": None,
-            "left_played": None,
-            "right_played": None,
-            "my_played": None,
             "passes": set(),
         }
         pending = {}
@@ -187,6 +185,13 @@ class WorkerThread(QThread):
             "right_played": False,
             "my_played": False,
         }
+
+        round_initialized = False
+        round_signature = None
+        expected_side = None
+        wechat_other_hands_cards_str = ""
+        side_cycle = {"me": "right", "right": "left", "left": "me"}
+        landlord_start_side = {0: "right", 1: "me", 2: "left"}
 
         def display_cards(cards):
             if not cards:
@@ -202,6 +207,62 @@ class WorkerThread(QThread):
                 previous, count = value, 1
             pending[key] = (previous, count)
             return value if count >= frames else None
+
+        def player_for_side(side):
+            if self.my_position_code is None:
+                return None
+            if side == "me":
+                return self.my_position
+            if side == "right":
+                return PlayerPosition[(self.my_position_code + 1) % 3]
+            if side == "left":
+                return PlayerPosition[(self.my_position_code + 2) % 3]
+            return None
+
+        def initialize_round(my_hand, three_cards, position_code):
+            nonlocal round_initialized, round_signature, expected_side
+            nonlocal wechat_other_hands_cards_str
+
+            self.my_hand_cards = my_hand
+            self.three_cards = three_cards
+            self.my_position_code = position_code
+            self.my_position = PlayerPosition[position_code]
+
+            self.hand_inference = HandInferenceEngine(
+                my_position=self.my_position,
+                my_hand_cards=my_hand,
+                three_landlord_cards=three_cards,
+            )
+
+            remaining = list(AllEnvCard)
+            for card in [RealCard2EnvCard[ch] for ch in my_hand]:
+                if card in remaining:
+                    remaining.remove(card)
+            wechat_other_hands_cards_str = ''.join(
+                [EnvCard2RealCard[x] for x in remaining]
+            )[::-1]
+            self.other_hands_cards_str = wechat_other_hands_cards_str
+            self.card_recorder_signal.emit(wechat_other_hands_cards_str)
+            self.three_cards_signal.emit(three_cards)
+            self.my_position_signal.emit(self.my_position)
+
+            for key in played_latched:
+                played_latched[key] = False
+            last_state["passes"] = set()
+
+            expected_side = landlord_start_side[position_code]
+            round_signature = (my_hand, three_cards, position_code)
+            round_initialized = True
+
+            print()
+            print("===== 微信牌局状态已初始化 =====")
+            print(f"我的初始手牌({len(my_hand)}): {display_cards(my_hand)}")
+            print(f"三张底牌: {display_cards(three_cards)}")
+            print(f"我的身份: {self.my_position}")
+            print(f"首个行动方: {expected_side}")
+            print("==============================")
+            print()
+            self.refresh_hand_inference()
 
         while self.worker_runing:
             screenshot, _ = await self.screenHelper.getScreenshot()
@@ -231,38 +292,27 @@ class WorkerThread(QThread):
             try:
                 my_hand_raw = recognizer.recognize_my_hand(screenshot)
                 my_hand = stable_value("my_hand", my_hand_raw, frames=3)
-                if my_hand is not None and my_hand != last_state["my_hand"]:
-                    if my_hand:
-                        print(f"微信专用识牌 >>> 我的手牌({len(my_hand)}): {display_cards(my_hand)}")
+                if my_hand is not None and my_hand:
+                    if my_hand != last_state["my_hand"]:
+                        print(
+                            f"微信专用识牌 >>> 我的手牌({len(my_hand)}): "
+                            f"{display_cards(my_hand)}"
+                        )
                         last_state["my_hand"] = my_hand
-
-                        if len(my_hand) in (17, 20):
-                            self.my_hand_cards = my_hand
-                            remaining = list(AllEnvCard)
-                            for card in [RealCard2EnvCard[ch] for ch in my_hand]:
-                                if card in remaining:
-                                    remaining.remove(card)
-                            self.card_recorder_signal.emit(
-                                ''.join([EnvCard2RealCard[x] for x in remaining])[::-1]
-                            )
 
                 three_raw = recognizer.recognize_bottom_cards(screenshot)
                 three_cards = stable_value("three_cards", three_raw)
-                if (
-                    three_cards is not None
-                    and len(three_cards) == 3
-                    and three_cards != last_state["three_cards"]
-                ):
-                    print(f"微信专用识牌 >>> 三张底牌: {display_cards(three_cards)}")
-                    last_state["three_cards"] = three_cards
-                    self.three_cards_signal.emit(three_cards)
+                if three_cards is not None and len(three_cards) == 3:
+                    if three_cards != last_state["three_cards"]:
+                        print(
+                            f"微信专用识牌 >>> 三张底牌: "
+                            f"{display_cards(three_cards)}"
+                        )
+                        last_state["three_cards"] = three_cards
+                        self.three_cards_signal.emit(three_cards)
 
                 landlord_side = recognizer.detect_landlord_side(screenshot)
-                position_map = {
-                    "right": 0,
-                    "me": 1,
-                    "left": 2,
-                }
+                position_map = {"right": 0, "me": 1, "left": 2}
                 position_code = stable_value(
                     "position_code", position_map.get(landlord_side)
                 )
@@ -270,8 +320,6 @@ class WorkerThread(QThread):
                     position_code is not None
                     and position_code != last_state["position_code"]
                 ):
-                    self.my_position_code = position_code
-                    self.my_position = PlayerPosition[position_code]
                     position_text = {
                         0: "农民（地主上家）",
                         1: "地主",
@@ -279,53 +327,109 @@ class WorkerThread(QThread):
                     }[position_code]
                     print(f"微信专用识牌 >>> 我的身份: {position_text}")
                     last_state["position_code"] = position_code
-                    self.my_position_signal.emit(self.my_position)
 
-                for key, label, value in (
-                    ("left_played", "左侧出牌", recognizer.recognize_left_played(screenshot)),
-                    ("right_played", "右侧出牌", recognizer.recognize_right_played(screenshot)),
-                    ("my_played", "我的出牌", recognizer.recognize_my_played(screenshot)),
-                ):
-                    stable = stable_value(key, value)
-                    if stable is None:
-                        continue
+                ready_hand = last_state["my_hand"] or ""
+                ready_three = last_state["three_cards"] or ""
+                ready_position = last_state["position_code"]
+                ready = (
+                    len(ready_hand) in (17, 20)
+                    and len(ready_three) == 3
+                    and ready_position is not None
+                )
 
-                    # One visual play may disappear card-by-card during its fade-out
-                    # animation (for example 22 -> 2 -> empty). Once a play is
-                    # accepted, keep that side latched until the region is stably
-                    # empty before accepting another play from the same side.
-                    if stable == "":
-                        if played_latched[key]:
-                            played_latched[key] = False
-                            last_state[key] = None
-                        continue
+                if ready:
+                    signature = (ready_hand, ready_three, ready_position)
+                    should_initialize = not round_initialized
+                    if (
+                        round_initialized
+                        and signature != round_signature
+                        and self.hand_inference is not None
+                        and len(self.hand_inference.history) > 0
+                    ):
+                        should_initialize = True
+                        print()
+                        print("检测到新的初始手牌，开始新一局状态...")
 
-                    if played_latched[key]:
-                        continue
+                    if should_initialize:
+                        initialize_round(ready_hand, ready_three, ready_position)
 
-                    print(f"微信专用识牌 >>> {label}: {display_cards(stable)}")
-                    last_state[key] = stable
-                    played_latched[key] = True
+                played_values = {
+                    "left": recognizer.recognize_left_played(screenshot),
+                    "right": recognizer.recognize_right_played(screenshot),
+                    "me": recognizer.recognize_my_played(screenshot),
+                }
+
+                action_accepted = False
+                if round_initialized and expected_side is not None:
+                    key_map = {
+                        "left": "left_played",
+                        "right": "right_played",
+                        "me": "my_played",
+                    }
+                    label_map = {
+                        "left": "左侧出牌",
+                        "right": "右侧出牌",
+                        "me": "我的出牌",
+                    }
+                    current_key = key_map[expected_side]
+                    stable_play = stable_value(
+                        current_key, played_values[expected_side], frames=2
+                    )
+
+                    if stable_play == "":
+                        played_latched[current_key] = False
+                    elif stable_play and not played_latched[current_key]:
+                        played_latched[current_key] = True
+                        player = player_for_side(expected_side)
+                        if player is not None:
+                            print(
+                                f"微信牌局 >>> {label_map[expected_side]}: "
+                                f"{display_cards(stable_play)}"
+                            )
+                            self.played_card_signal.emit([player, stable_play])
+
+                            if expected_side != "me":
+                                wechat_other_hands_cards_str = remove_chars_from_string(
+                                    wechat_other_hands_cards_str, stable_play
+                                )
+                                self.other_hands_cards_str = wechat_other_hands_cards_str
+                                self.card_recorder_signal.emit(
+                                    wechat_other_hands_cards_str
+                                )
+
+                            self.record_hand_inference_action(player, stable_play)
+                            expected_side = side_cycle[expected_side]
+                            action_accepted = True
 
                 passes = recognizer.detect_pass_sides(screenshot)
-                stable_passes = stable_value("passes", frozenset(passes))
+                stable_passes = stable_value("passes", frozenset(passes), frames=2)
                 if stable_passes is not None:
                     stable_passes = set(stable_passes)
-                    for side, label in (
-                        ("left", "左侧玩家"),
-                        ("right", "右侧玩家"),
-                        ("me", "我"),
+                    if (
+                        round_initialized
+                        and not action_accepted
+                        and expected_side in stable_passes
+                        and expected_side not in last_state["passes"]
                     ):
-                        if side in stable_passes and side not in last_state["passes"]:
-                            print(f"微信专用识牌 >>> {label}：不出")
+                        player = player_for_side(expected_side)
+                        if player is not None:
+                            label = {
+                                "left": "左侧玩家",
+                                "right": "右侧玩家",
+                                "me": "我",
+                            }[expected_side]
+                            print(f"微信牌局 >>> {label}：不出")
+                            self.played_card_signal.emit([player, "Pass"])
+                            self.record_hand_inference_action(player, "")
+                            expected_side = side_cycle[expected_side]
                     last_state["passes"] = stable_passes
 
             except Exception as exc:
-                print(f"微信专用识别异常（不会退出线程）: {exc}")
+                print(f"微信牌局接入异常（不会退出线程）: {exc}")
 
             await asyncio.sleep(0.35)
 
-        print("微信小程序专用识别线程已停止")
+        print("微信小程序牌局接入线程已停止")
         print()
 
     async def before_start(self):
