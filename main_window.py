@@ -175,43 +175,60 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_ai_suggestion_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
 
-        if len(result) == 0 or not isinstance(result, list):
-            for i in range(3):
-                emplty_item1 = QtWidgets.QTableWidgetItem('-')
-                emplty_item1.setFont(font_content)
-                emplty_item1.setTextAlignment(QtCore.Qt.AlignCenter)
-                emplty_item2 = QtWidgets.QTableWidgetItem('-')
-                emplty_item2.setFont(font_content)
-                emplty_item2.setTextAlignment(QtCore.Qt.AlignCenter)
-                self.suggestionTable.setItem(i + 1, 0, emplty_item1)
-                self.suggestionTable.setItem(i + 1, 1, emplty_item2)
-            
+        if not result or not isinstance(result, list):
+            for row in range(1, 4):
+                for col in range(3):
+                    item = QtWidgets.QTableWidgetItem("-")
+                    item.setFont(font_content)
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    self.suggestionTable.setItem(row, col, item)
             return
-        
+
         for i in range(3):
-            data = result[i] if len(result) > i else ('-', '-')
-            action_text = data[0]
+            data = result[i] if len(result) > i else ("-", "-", "-")
+            action_text = data[0] if len(data) > 0 else "-"
+            score_text = data[1] if len(data) > 1 else "-"
+            risk_text = data[2] if len(data) > 2 else "-"
+
             if isinstance(action_text, str) and action_text not in ("-", "Pass"):
                 action_text = self.display_cards(action_text)
-            left_item = QtWidgets.QTableWidgetItem(action_text)
-            left_item.setFont(font_content)
-            left_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            left_item.setForeground(QtGui.QColor("#0000FF"))
-            self.suggestionTable.setItem(i + 1, 0, left_item)
 
-            right_item = QtWidgets.QTableWidgetItem(data[1])
-            right_item.setFont(font_content)
-            right_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            action_item = QtWidgets.QTableWidgetItem(action_text)
+            action_item.setFont(font_content)
+            action_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            action_item.setForeground(QtGui.QColor("#0066cc"))
+            self.suggestionTable.setItem(i + 1, 0, action_item)
 
-            if data[1] != '-':
-                if float(data[1]) >= 1:
-                    right_item.setForeground(QtGui.QColor("#ff0000"))
-                elif float(data[1]) < 1:
-                    right_item.setForeground(QtGui.QColor("#000000"))
-                elif float(data[1]) < 0.1:
-                    right_item.setForeground(QtGui.QColor("#00FF00"))
+            score_item = QtWidgets.QTableWidgetItem(str(score_text))
+            score_item.setFont(font_content)
+            score_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            if score_text != "-":
+                try:
+                    score = float(score_text)
+                    if score >= 1:
+                        score_item.setForeground(QtGui.QColor("#d00000"))
+                    elif score < 0:
+                        score_item.setForeground(QtGui.QColor("#808080"))
+                except (TypeError, ValueError):
+                    pass
+            self.suggestionTable.setItem(i + 1, 1, score_item)
 
-            self.suggestionTable.setItem(i + 1, 1, right_item)
+            risk_item = QtWidgets.QTableWidgetItem(str(risk_text))
+            risk_item.setFont(font_content)
+            risk_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            risk_item.setToolTip("当前隐藏手牌样本中，敌方至少有一手合法牌可压住该动作的比例；不是胜率，也不代表敌方一定会出")
+            if isinstance(risk_text, str) and risk_text.endswith("%"):
+                try:
+                    risk = float(risk_text[:-1]) / 100.0
+                    if risk >= 0.75:
+                        risk_item.setForeground(QtGui.QColor("#d00000"))
+                    elif risk >= 0.50:
+                        risk_item.setForeground(QtGui.QColor("#c26b00"))
+                    elif risk <= 0.20:
+                        risk_item.setForeground(QtGui.QColor("#008000"))
+                except ValueError:
+                    pass
+            self.suggestionTable.setItem(i + 1, 2, risk_item)
 
     def handle_bid_win_rate_update(self, result):
         font_content = QtGui.QFont("微软雅黑", 8, QtGui.QFont.Bold)
@@ -766,7 +783,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.suggestionTable.setGeometry(0, 209, 266, 150)
         self.suggestionTable.setFixedSize(266, 150)
         self.suggestionTable.setRowCount(4)
-        self.suggestionTable.setColumnCount(2)
+        self.suggestionTable.setColumnCount(3)
 
         self.suggestionTable.verticalHeader().setVisible(False)
         self.suggestionTable.horizontalHeader().setVisible(False)
@@ -775,14 +792,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for row in range(4):
             self.suggestionTable.setRowHeight(row, 33)
 
-        self.suggestionTable.setColumnWidth(0, 168)
-        self.suggestionTable.setColumnWidth(1, 94)
+        self.suggestionTable.setColumnWidth(0, 130)
+        self.suggestionTable.setColumnWidth(1, 58)
+        self.suggestionTable.setColumnWidth(2, 74)
 
-        headers = ['AI 建议出牌', '胜率']
+        headers = ['AI 建议', '模型分', '敌方可压']
         contents = [
-            ('-', '-'),
-            ('-', '-'),
-            ('-', '-')
+            ('-', '-', '-'),
+            ('-', '-', '-'),
+            ('-', '-', '-')
         ]
 
         font_header = QtGui.QFont("微软雅黑", 8)
@@ -794,16 +812,12 @@ class MainWindow(QtWidgets.QMainWindow):
             item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.suggestionTable.setItem(0, col, item)
 
-        for row, (left, right) in enumerate(contents, start=1):
-            left_item = QtWidgets.QTableWidgetItem(left)
-            left_item.setFont(font_content)
-            left_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            self.suggestionTable.setItem(row, 0, left_item)
-
-            right_item = QtWidgets.QTableWidgetItem(right)
-            right_item.setFont(font_content)
-            right_item.setTextAlignment(QtCore.Qt.AlignCenter)
-            self.suggestionTable.setItem(row, 1, right_item)
+        for row, (action, score, risk) in enumerate(contents, start=1):
+            for col, value in enumerate((action, score, risk)):
+                item = QtWidgets.QTableWidgetItem(value)
+                item.setFont(font_content)
+                item.setTextAlignment(QtCore.Qt.AlignCenter)
+                self.suggestionTable.setItem(row, col, item)
 
         self.suggestionTable.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.suggestionTable.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
