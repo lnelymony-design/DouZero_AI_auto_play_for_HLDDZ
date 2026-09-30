@@ -157,6 +157,24 @@ class HandInferenceEngineTests(unittest.TestCase):
             behavioral.min_effective_sample_ratio - 0.01,
         )
 
+    def test_combo_risk_summary_matches_rank_statistics(self):
+        engine = HandInferenceEngine(
+            my_position="landlord_up",
+            my_hand_cards="33445566778899TJQ",
+            three_landlord_cards="D2A",
+            sample_count=320,
+            random_seed=31,
+        )
+        result = engine.infer()
+        landlord = result["players"]["landlord"]
+        risks = landlord["combo_risks"]
+
+        self.assertEqual(risks["has_2"], landlord["cards"]["2"]["one_plus"])
+        self.assertEqual(risks["pair_2"], landlord["cards"]["2"]["pair_plus"])
+        self.assertEqual(risks["triple_A"], landlord["cards"]["A"]["triple_plus"])
+        self.assertEqual(risks["any_bomb"], landlord["any_bomb"])
+        self.assertEqual(risks["rocket"], landlord["rocket"])
+
     def test_adaptive_tempering_respects_ess_floor(self):
         engine = HandInferenceEngine(
             my_position="landlord",
