@@ -35,7 +35,7 @@ def _to_float(value):
     return result if isfinite(result) else None
 
 
-def adjust_candidates(candidates, weight=0.30):
+def adjust_candidates(candidates, weight=0.45):
     """Return candidates with a transparent risk-adjusted relative ranking."""
     weight = max(0.0, min(0.8, float(weight)))
 
