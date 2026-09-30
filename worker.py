@@ -19,6 +19,7 @@ from douzero.evaluation.deep_agent_new import DeepAgent
 
 from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticModeEnum
 from utils import remove_chars_from_string
+from inference import HandInferenceEngine
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -31,6 +32,7 @@ class WorkerThread(QThread):
     bid_win_rate_signal = pyqtSignal(list)
     game_win_rate_signal = pyqtSignal(float)
     played_card_signal = pyqtSignal(list)
+    hand_inference_signal = pyqtSignal(dict)
 
     def __init__(self, automatic_mode, bid_threshold, redouble_threshold, super_redouble_threshold, mingpai_threshold):
         super(WorkerThread, self).__init__()
@@ -96,6 +98,9 @@ class WorkerThread(QThread):
 
         self.action_message = None
         self.action_list = None
+
+        # 概率推牌器：利用已知手牌、底牌、出牌和 Pass 动作推测两家剩余手牌。
+        self.hand_inference = None
 
         self.try_num = 3
         self.round_count = 0
@@ -200,6 +205,14 @@ class WorkerThread(QThread):
         print("正在处理本次牌局数据...")
         self.initOtherPlayerHandCards()
         self.initAllPlayerCardData()
+
+        # 独立于 DouZero 的隐藏手牌概率模型。这里直接复用屏幕识别得到的真实牌局状态。
+        self.hand_inference = HandInferenceEngine(
+            my_position=self.my_position,
+            my_hand_cards=self.my_hand_cards,
+            three_landlord_cards=self.three_cards,
+        )
+        self.refresh_hand_inference()
         print()
 
         self.play_order = 0 if self.my_position == "landlord" else 1 if self.my_position == "landlord_up" else 2
@@ -319,6 +332,7 @@ class WorkerThread(QThread):
 
         self.action_message = None
         self.action_list = None
+        self.hand_inference = None
 
     def reset_ui_status(self):
         self.card_recorder_signal.emit('')
@@ -328,6 +342,7 @@ class WorkerThread(QThread):
         self.bid_win_rate_signal.emit([])
         self.game_win_rate_signal.emit(-1000)
         self.played_card_signal.emit([])
+        self.hand_inference_signal.emit({})
 
     def stop_task(self):
         print("正在停止工作线程...")
@@ -460,6 +475,7 @@ class WorkerThread(QThread):
                 self.card_recorder_signal.emit(self.other_hands_cards_str)
             
             tempData = rightPlayedCards if rightPlayed else ""
+            self.record_hand_inference_action(rightPosition, tempData)
             self.other_played_cards_env = [RealCard2EnvCard[c] for c in list(tempData)]
             self.other_played_cards_env.sort()
             self.env.step(self.my_position, self.other_played_cards_env)
@@ -519,6 +535,7 @@ class WorkerThread(QThread):
                 self.card_recorder_signal.emit(self.other_hands_cards_str)
             
             tempData = leftPlayedCards if leftPlayed else ""
+            self.record_hand_inference_action(leftPosition, tempData)
             self.other_played_cards_env = [RealCard2EnvCard[c] for c in list(tempData)]
             self.other_played_cards_env.sort()
             self.env.step(self.my_position, self.other_played_cards_env)
@@ -607,6 +624,7 @@ class WorkerThread(QThread):
         
         if (myBuchu is not None) or myPlayed:
             tempData = myPlayedCards if myPlayed else ""
+            self.record_hand_inference_action(self.my_position, tempData)
             self.my_played_cards_env = [RealCard2EnvCard[c] for c in list(tempData)]
             self.my_played_cards_env.sort()
             self.env.step(self.my_position, self.my_played_cards_env)
@@ -622,6 +640,36 @@ class WorkerThread(QThread):
             
             self.ai_suggested_received = False
             self.my_played_card_clicked = False
+
+    def refresh_hand_inference(self):
+        """重新计算并发送两家隐藏手牌概率；失败时不影响原有牌局线程。"""
+        if self.hand_inference is None:
+            return
+
+        try:
+            result = self.hand_inference.infer()
+            self.hand_inference_signal.emit(result)
+
+            summary = HandInferenceEngine.compact_summary(result)
+            if summary:
+                print("推牌 >>>", summary)
+                print()
+        except Exception as exc:
+            # 推牌器属于辅助层，任何异常都不能打断原项目的识牌和 DouZero 流程。
+            print(f"推牌器更新失败: {exc}")
+            print()
+
+    def record_hand_inference_action(self, player, cards):
+        """记录一次屏幕识别到的公开动作并刷新后验概率。"""
+        if self.hand_inference is None:
+            return
+
+        try:
+            self.hand_inference.observe(player, cards)
+            self.refresh_hand_inference()
+        except Exception as exc:
+            print(f"推牌器记录动作失败: player={player}, cards={cards}, error={exc}")
+            print()
 
     async def autoBidding(self):
         self.in_bidding_progress = True
