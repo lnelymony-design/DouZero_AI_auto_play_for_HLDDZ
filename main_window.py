@@ -101,6 +101,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hudManager.toggle_visible()
         self._sync_hud_buttons()
 
+    def handle_hud_reset_clicked(self):
+        if not hasattr(self, "hudManager"):
+            return
+        self.hudManager.reset_positions()
+
     def _update_hud_inference(self):
         if not hasattr(self, "hudManager"):
             return
@@ -1154,6 +1159,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.hudVisibleBtn.setFixedHeight(40)
         self.hudVisibleBtn.clicked.connect(self.handle_hud_visible_clicked)
 
+        self.hudResetBtn = QtWidgets.QPushButton("HUD重置", self)
+        self.hudResetBtn.setFont(font)
+        self.hudResetBtn.setFixedWidth(100)
+        self.hudResetBtn.setFixedHeight(40)
+        self.hudResetBtn.clicked.connect(self.handle_hud_reset_clicked)
+
         self.startBtn = QtWidgets.QPushButton("启动", self)
         self.startBtn.setFont(font)
         self.startBtn.setFixedWidth(120)
@@ -1162,6 +1173,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         right_layout.addWidget(self.hudEditBtn)
         right_layout.addWidget(self.hudVisibleBtn)
+        right_layout.addWidget(self.hudResetBtn)
         right_layout.addWidget(self.cbMode)
         right_layout.addWidget(self.startBtn)
 
