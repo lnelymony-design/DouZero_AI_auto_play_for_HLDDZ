@@ -3,7 +3,7 @@ import json
 from statistics import mean
 
 from constants import RealCard2EnvCard
-from inference import HandInferenceEngine, adjust_candidates
+from inference import HandInferenceEngine, adjust_candidates, select_safer_alternative
 from inference.legality import can_beat
 from tools.evaluate_replay_suggestions import (
     POSITIONS, init_env, parse_replay, player_for_side,
@@ -48,7 +48,8 @@ def actual_response(events, index, code, final_hands, action):
 
 
 def evaluate(
-    replay, truth, weights, samples, max_candidates, behavior_mode
+    replay, truth, weights, samples, max_candidates, behavior_mode,
+    safer_risk_gains, safer_gap_fractions,
 ):
     code = replay["position_code"]
     mine = POSITIONS[code]
@@ -111,6 +112,25 @@ def evaluate(
                     "pass": top.action == "Pass",
                     "changed": top.model_rank != 1,
                 }
+
+            row["safer"] = {}
+            for risk_gain in safer_risk_gains:
+                for gap_fraction in safer_gap_fractions:
+                    key = (risk_gain, gap_fraction)
+                    alt = select_safer_alternative(
+                        triplets,
+                        min_risk_gain=risk_gain,
+                        max_model_gap_fraction=gap_fraction,
+                        max_model_rank=max_candidates,
+                    )
+                    row["safer"][key] = None if alt is None else {
+                        "truth": truth_map.get(alt.action),
+                        "raw_truth": truth_map.get(alt.raw_action),
+                        "risk_gain": alt.risk_gain,
+                        "model_gap": alt.model_gap,
+                        "model_gap_fraction": alt.model_gap_fraction,
+                        "model_rank": alt.model_rank,
+                    }
             decisions.append(row)
 
         env.step(
@@ -146,6 +166,14 @@ def main():
     p.add_argument("--samples", type=int, default=1600)
     p.add_argument("--max-candidates", type=int, default=3)
     p.add_argument(
+        "--safer-risk-gains", nargs="+", type=float,
+        default=[0.15, 0.20, 0.25, 0.30],
+    )
+    p.add_argument(
+        "--safer-gap-fractions", nargs="+", type=float,
+        default=[0.20, 0.35, 0.50],
+    )
+    p.add_argument(
         "--behavior-mode",
         choices=["uniform", "pass", "full"],
         default="full",
@@ -163,6 +191,7 @@ def main():
         cand, dec = evaluate(
             replay, truth, args.weights, args.samples,
             max(1, args.max_candidates), args.behavior_mode,
+            args.safer_risk_gains, args.safer_gap_fractions,
         )
         all_candidates += cand
         all_decisions += dec
@@ -219,6 +248,43 @@ def main():
             f"nonpass={len(vals)} pass={passes} "
             f"beatable={pct(rate(vals))}"
         )
+
+    print("\n=== SAFER ALTERNATIVE TRUTH GRID ===")
+    print(
+        "offered = 有多少决策点会显示更稳备选；"
+        "raw/alt beatable = 这些同一决策点上原建议/备选的真实可压率。"
+    )
+    for risk_gain in args.safer_risk_gains:
+        for gap_fraction in args.safer_gap_fractions:
+            key = (risk_gain, gap_fraction)
+            rows = [
+                row["safer"].get(key) for row in all_decisions
+                if row.get("safer", {}).get(key) is not None
+            ]
+            raw_vals = [
+                float(x["raw_truth"]) for x in rows
+                if x["raw_truth"] is not None
+            ]
+            alt_vals = [
+                float(x["truth"]) for x in rows
+                if x["truth"] is not None
+            ]
+            avg_gain = (
+                None if not rows
+                else mean(x["risk_gain"] for x in rows)
+            )
+            avg_gap = (
+                None if not rows
+                else mean(x["model_gap_fraction"] for x in rows)
+            )
+            print(
+                f"risk>={risk_gain:.0%} gap<={gap_fraction:.0%}: "
+                f"offered={len(rows)}/{len(all_decisions)} "
+                f"raw={pct(rate(raw_vals))} "
+                f"alt={pct(rate(alt_vals))} "
+                f"pred_gain={pct(avg_gain)} "
+                f"avg_gap={pct(avg_gap)}"
+            )
 
 
 if __name__ == "__main__":
