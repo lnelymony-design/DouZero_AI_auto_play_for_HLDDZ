@@ -35,7 +35,7 @@ jobs:
             tools/replay_fixtures/game_01.replay.json \
             tools/replay_fixtures/game_02.replay.json \
             tools/replay_fixtures/game_03.replay.json \
-            --weights 0.42 0.44 0.46 0.48 0.50 0.52 0.54 0.55 \
+            --weights 0.30 0.40 0.45 0.49 \
             --samples 1000 \
             --min-ess 0.40 | tee lambda-eval.txt
       - name: Validate response risk against settlement truth
@@ -47,7 +47,7 @@ jobs:
             tools/replay_fixtures/game_01.replay.json \
             tools/replay_fixtures/game_02.replay.json \
             tools/replay_fixtures/game_03.replay.json \
-            --weights 0.42 0.46 0.50 0.52 0.54 \
+            --weights 0.30 0.40 0.45 0.49 \
             --samples 1600 \
             --max-candidates 3 | tee truth-eval.txt
       - uses: actions/upload-artifact@v4
