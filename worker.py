@@ -420,8 +420,14 @@ class WorkerThread(QThread):
                 }
                 for player, cards in self.hand_inference.history
             ]
+            now = time.monotonic()
             pending_round_audit = {
-                "due_time": time.monotonic() + 1.2,
+                # Settlement timing varies across the three recordings. Capture
+                # a short burst so the evaluator can choose the frame in which
+                # both revealed hands are actually visible.
+                "capture_times": [now + 0.8, now + 1.6, now + 2.4],
+                "screenshots": [],
+                "audit_stamp": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
                 "reason": reason,
                 "ended_at": datetime.now().isoformat(timespec="seconds"),
                 "my_position": self.my_position,
@@ -447,34 +453,42 @@ class WorkerThread(QThread):
             nonlocal pending_round_audit
             if pending_round_audit is None:
                 return
-            if time.monotonic() < pending_round_audit["due_time"]:
+
+            capture_times = pending_round_audit.get("capture_times", [])
+            if not capture_times or time.monotonic() < capture_times[0]:
                 return
 
             try:
                 root = os.path.join("screenshots", "inference_audits")
                 os.makedirs(root, exist_ok=True)
-                stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-                image_name = f"{stamp}.png"
-                json_name = f"{stamp}.json"
+                stamp = pending_round_audit["audit_stamp"]
+                index = len(pending_round_audit["screenshots"]) + 1
+                image_name = f"{stamp}_{index}.png"
                 image_path = os.path.join(root, image_name)
-                json_path = os.path.join(root, json_name)
-
                 screenshot.save(image_path)
+                pending_round_audit["screenshots"].append(image_name)
+                capture_times.pop(0)
+
+                if capture_times:
+                    return
+
+                json_name = f"{stamp}.json"
+                json_path = os.path.join(root, json_name)
                 payload = dict(pending_round_audit)
-                payload.pop("due_time", None)
-                payload["screenshot"] = image_name
-                payload["format"] = "wechat_inference_audit_v1"
+                payload.pop("capture_times", None)
+                payload.pop("audit_stamp", None)
+                payload["format"] = "wechat_inference_audit_v2"
 
                 with open(json_path, "w", encoding="utf-8") as fp:
                     json.dump(payload, fp, ensure_ascii=False, indent=2)
 
                 print(
                     f"推牌审计已保存 >>> {json_path} "
-                    f"(结算截图 {image_name})"
+                    f"(结算截图 {len(payload['screenshots'])} 张)"
                 )
+                pending_round_audit = None
             except Exception as exc:
                 print(f"推牌审计保存失败: {exc}")
-            finally:
                 pending_round_audit = None
 
         def initialize_round(my_hand, three_cards, position_code):
