@@ -214,6 +214,7 @@ class WorkerThread(QThread):
         douzero_players = None
         douzero_history = []
         douzero_paused_reason = None
+        suggestion_audit = []
         pending_round_audit = None
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
@@ -427,6 +428,47 @@ class WorkerThread(QThread):
                         f"风险调整暂停 >>> ESS {ess_ratio:.0%} "
                         f"< 阈值 {self.config.risk_adjustment_min_ess_ratio:.0%}"
                     )
+
+                if candidate_triplets:
+                    raw_action, raw_score, raw_risk = candidate_triplets[0]
+                    suggestion_audit.append({
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "history_length": len(douzero_history),
+                        "ess_ratio": ess_ratio,
+                        "risk_adjustment_enabled": adjustment_enabled,
+                        "risk_adjustment_weight": self.config.risk_adjustment_weight,
+                        "raw_top": {
+                            "action": raw_action,
+                            "model_score": float(raw_score),
+                            "response_risk": raw_risk,
+                        },
+                        "adjusted_top": (
+                            None
+                            if adjusted_winner is None
+                            else {
+                                "action": adjusted_winner.action,
+                                "model_rank": adjusted_winner.model_rank,
+                                "model_score": adjusted_winner.model_score,
+                                "response_risk": adjusted_winner.response_risk,
+                                "adjusted_score": adjusted_winner.adjusted_score,
+                            }
+                        ),
+                        "changed_top_action": bool(
+                            adjusted_winner is not None
+                            and adjusted_winner.model_rank != 1
+                        ),
+                        "candidates": [
+                            {
+                                "action": item.action,
+                                "model_rank": item.model_rank,
+                                "model_score": item.model_score,
+                                "response_risk": item.response_risk,
+                                "adjusted_rank": item.adjusted_rank,
+                                "adjusted_score": item.adjusted_score,
+                            }
+                            for item in adjusted_candidates
+                        ],
+                    })
             except Exception as exc:
                 pause_douzero(f"建议计算失败：{exc}")
 
@@ -517,6 +559,7 @@ class WorkerThread(QThread):
                     }
                     for player, cards in douzero_history
                 ],
+                "suggestion_audit": list(suggestion_audit),
             }
 
         def flush_round_audit_if_due(screenshot):
@@ -547,7 +590,7 @@ class WorkerThread(QThread):
                 payload = dict(pending_round_audit)
                 payload.pop("capture_times", None)
                 payload.pop("audit_stamp", None)
-                payload["format"] = "wechat_inference_audit_v2"
+                payload["format"] = "wechat_inference_audit_v3"
 
                 with open(json_path, "w", encoding="utf-8") as fp:
                     json.dump(payload, fp, ensure_ascii=False, indent=2)
@@ -599,6 +642,7 @@ class WorkerThread(QThread):
             self.all_player_card_data = {}
             self.env = None
             douzero_history.clear()
+            suggestion_audit.clear()
             douzero_initial_data = None
             douzero_players = None
             douzero_paused_reason = None
