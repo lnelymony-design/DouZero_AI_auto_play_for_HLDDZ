@@ -10,6 +10,7 @@ import math
 import random
 
 from constants import AllEnvCard, EnvCard2RealCard, RealCard2EnvCard
+from douzero.env import move_detector as md
 from .legality import can_beat
 
 POSITIONS = ("landlord", "landlord_up", "landlord_down")
@@ -52,6 +53,9 @@ class HandInferenceEngine:
         three_landlord_cards="",
         sample_count=1600,
         pass_penalty=0.62,
+        friendly_pass_penalty=0.86,
+        play_behavior_floor=0.18,
+        play_behavior_strength=1.0,
         random_seed=None,
     ):
         if my_position not in POSITIONS:
@@ -61,6 +65,15 @@ class HandInferenceEngine:
         self.three_landlord_cards = list(three_landlord_cards or "")
         self.sample_count = max(200, int(sample_count))
         self.pass_penalty = min(1.0, max(0.05, float(pass_penalty)))
+        self.friendly_pass_penalty = min(
+            1.0, max(self.pass_penalty, float(friendly_pass_penalty))
+        )
+        self.play_behavior_floor = min(
+            0.95, max(0.05, float(play_behavior_floor))
+        )
+        self.play_behavior_strength = min(
+            3.0, max(0.0, float(play_behavior_strength))
+        )
         # Common random numbers make adjacent public states comparable and keep
         # the UI from flickering purely because a fresh Monte-Carlo stream was
         # drawn.  A caller-provided seed still overrides the default.
@@ -131,33 +144,154 @@ class HandInferenceEngine:
             for p in self.opponents
         }
 
-    def _build_pass_contexts(self):
-        """For each opponent Pass, store the rival move and later cards to restore.
+    @staticmethod
+    def _same_team(player_a, player_b):
+        if not player_a or not player_b:
+            return False
+        return player_a != "landlord" and player_b != "landlord"
 
-        A sampled *current* hand can be reconstructed at an earlier Pass by
-        adding cards that the same player played after that Pass.
+    def _pass_penalty_for(self, passer, rival_player):
+        # Farmer-vs-farmer passes are much weaker evidence: letting a teammate's
+        # winning card stand is normal cooperative play.  A pass against the
+        # opposing camp is more informative.
+        if self._same_team(passer, rival_player):
+            return self.friendly_pass_penalty
+        return self.pass_penalty
+
+    def _build_behavior_contexts(self):
+        """Build Pass and actual-play evidence from the public action history.
+
+        Every context stores the cards that the same player plays *later*, so a
+        sampled current hand can be rewound to the exact moment of the action.
         """
-        contexts = []
+        pass_contexts = []
+        play_contexts = []
         last_move = ""
+        last_player = None
         pass_streak = 0
 
         for idx, (player, action) in enumerate(self.history):
+            future_cards = []
+            if player in self.opponents:
+                for later_player, later_action in self.history[idx + 1:]:
+                    if later_player == player and later_action:
+                        future_cards.extend(list(later_action))
+
             if not action:
                 if player in self.opponents and last_move:
-                    future_cards = []
-                    for later_player, later_action in self.history[idx + 1:]:
-                        if later_player == player and later_action:
-                            future_cards.extend(list(later_action))
-                    contexts.append((player, last_move, future_cards))
+                    pass_contexts.append(
+                        (player, last_player, last_move, future_cards)
+                    )
                 pass_streak += 1
                 if pass_streak >= 2:
                     last_move = ""
+                    last_player = None
                     pass_streak = 0
             else:
+                if player in self.opponents:
+                    play_contexts.append(
+                        (player, action, last_player, last_move, future_cards)
+                    )
                 last_move = action
+                last_player = player
                 pass_streak = 0
 
-        return contexts
+        return pass_contexts, play_contexts
+
+    @staticmethod
+    def _rank_response_width(move_type):
+        if move_type == md.TYPE_1_SINGLE:
+            return 1
+        if move_type == md.TYPE_2_PAIR:
+            return 2
+        if move_type == md.TYPE_3_TRIPLE:
+            return 3
+        return None
+
+    def _play_behavior_factor(self, reconstructed_hand, action, rival_action):
+        """Heuristic likelihood factor for an observed non-Pass play.
+
+        This is deliberately conservative and cheap enough to evaluate for every
+        Monte-Carlo particle.  It does *not* pretend to model optimal play.
+        Instead it uses two robust behavioral clues:
+
+        1. breaking a pair/triple/bomb to play fewer copies is less natural;
+        2. when responding with a single/pair/triple, using a much higher rank
+           despite holding lower legal responses is less natural.
+
+        Bombs/rocket are also mildly down-weighted when another response was
+        available.  The returned factor is clamped, so one behavioral guess can
+        never eliminate an otherwise legal hidden hand.
+        """
+        if not action:
+            return 1.0
+
+        hand_counter = Counter(reconstructed_hand)
+        action_counter = Counter(action)
+        raw = 1.0
+
+        # Structure-splitting evidence.
+        for card, used in action_counter.items():
+            owned = hand_counter[card]
+            if 0 < used < owned:
+                extra = owned - used
+                if used == 1:
+                    raw *= {1: 0.80, 2: 0.64, 3: 0.45}.get(extra, 0.45)
+                elif used == 2:
+                    raw *= {1: 0.74, 2: 0.52}.get(extra, 0.52)
+                elif used == 3:
+                    raw *= 0.58
+
+        action_env = sorted(RealCard2EnvCard[c] for c in action)
+        action_type = md.get_move_type(action_env)
+        action_kind = action_type.get("type")
+
+        # If this was a same-type response, lower legal ranks that were also
+        # available make the chosen high response somewhat less likely.
+        if rival_action:
+            rival_env = sorted(RealCard2EnvCard[c] for c in rival_action)
+            rival_type = md.get_move_type(rival_env)
+            width = self._rank_response_width(action_kind)
+            if (
+                width is not None
+                and rival_type.get("type") == action_kind
+                and "rank" in action_type
+                and "rank" in rival_type
+            ):
+                rival_rank = rival_type["rank"]
+                actual_rank = action_type["rank"]
+                env_counts = Counter(
+                    RealCard2EnvCard[c] for c in reconstructed_hand
+                )
+                lower_options = 0
+                for rank, count in env_counts.items():
+                    if rival_rank < rank < actual_rank and count >= width:
+                        lower_options += 1
+                if lower_options:
+                    raw *= max(0.55, 0.88 ** lower_options)
+
+            # Bomb/rocket conservation: if removing the observed bomb still
+            # leaves any legal response, using the bomb was less forced.
+            if action_kind in (md.TYPE_4_BOMB, md.TYPE_5_KING_BOMB):
+                remaining = Counter(
+                    RealCard2EnvCard[c] for c in reconstructed_hand
+                )
+                remaining.subtract(Counter(action_env))
+                rest = [
+                    card
+                    for card, count in remaining.items()
+                    for _ in range(max(0, count))
+                ]
+                if rest and can_beat(rest, rival_env):
+                    raw *= 0.58
+
+        raw = max(self.play_behavior_floor, min(1.0, raw))
+        if self.play_behavior_strength <= 0:
+            return 1.0
+        return max(
+            self.play_behavior_floor,
+            raw ** self.play_behavior_strength,
+        )
 
     def _sample_current_hands(self, hidden_pool, remaining_counts, forced_landlord):
         pool = Counter(hidden_pool)
@@ -200,7 +334,7 @@ class HandInferenceEngine:
         hidden_pool = self._current_hidden_pool(played, current_my_hand)
         remaining_counts = self._remaining_counts(played)
         forced_landlord = self._forced_landlord_cards(played)
-        pass_contexts = self._build_pass_contexts()
+        pass_contexts, play_contexts = self._build_behavior_contexts()
 
         weighted_samples = []
         for _ in range(self.sample_count):
@@ -209,12 +343,30 @@ class HandInferenceEngine:
                 continue
 
             weight = 1.0
-            for player, rival_action, future_cards in pass_contexts:
+            for player, rival_player, rival_action, future_cards in pass_contexts:
                 reconstructed = list(hands[player]) + list(future_cards)
                 hand_env = [RealCard2EnvCard[c] for c in reconstructed]
                 rival_env = [RealCard2EnvCard[c] for c in rival_action]
                 if can_beat(hand_env, rival_env):
-                    weight *= self.pass_penalty
+                    weight *= self._pass_penalty_for(player, rival_player)
+
+            for (
+                player,
+                action,
+                rival_player,
+                rival_action,
+                future_cards,
+            ) in play_contexts:
+                reconstructed = (
+                    list(hands[player])
+                    + list(action)
+                    + list(future_cards)
+                )
+                weight *= self._play_behavior_factor(
+                    reconstructed,
+                    action,
+                    rival_action,
+                )
 
             if weight > 0:
                 weighted_samples.append((hands, weight))
@@ -289,7 +441,25 @@ class HandInferenceEngine:
             "samples": len(weighted_samples),
             "effective_samples": round(effective_samples, 1),
             "pass_evidence_count": len(pass_contexts),
+            "play_evidence_count": len(play_contexts),
+            "enemy_pass_evidence_count": sum(
+                1
+                for player, rival_player, _, _ in pass_contexts
+                if not self._same_team(player, rival_player)
+            ),
+            "friendly_pass_evidence_count": sum(
+                1
+                for player, rival_player, _, _ in pass_contexts
+                if self._same_team(player, rival_player)
+            ),
             "pass_penalty": self.pass_penalty,
+            "friendly_pass_penalty": self.friendly_pass_penalty,
+            "play_behavior_floor": self.play_behavior_floor,
+            "play_behavior_strength": self.play_behavior_strength,
+            "effective_sample_ratio": round(
+                effective_samples / len(weighted_samples), 3
+            ) if weighted_samples else 0.0,
+            "behavior_model": "heuristic_v2",
         }
 
     def response_risk(self, action, max_samples=320):
