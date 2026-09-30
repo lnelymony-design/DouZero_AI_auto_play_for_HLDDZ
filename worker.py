@@ -24,7 +24,7 @@ from douzero.evaluation.deep_agent_new import DeepAgent
 
 from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticModeEnum
 from utils import remove_chars_from_string
-from inference import HandInferenceEngine, adjust_candidates
+from inference import HandInferenceEngine
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -331,6 +331,9 @@ class WorkerThread(QThread):
                 enriched_actions = []
                 audit_candidates = []
 
+                left_player = player_for_side("left")
+                right_player = player_for_side("right")
+
                 for model_rank, (action_text, score_text) in enumerate(
                     top_actions, start=1
                 ):
@@ -347,21 +350,38 @@ class WorkerThread(QThread):
                         "-" if profile is None
                         else f"{profile['can_beat']:.0%}"
                     )
-                    ordinary_text = (
-                        "-" if profile is None
-                        else f"{profile['ordinary_beat']:.0%}"
+                    player_profiles = (
+                        {} if profile is None
+                        else profile.get("players", {})
                     )
-                    bomb_text = (
-                        "-" if profile is None
-                        else f"{profile['bomb_only']:.0%}"
+                    left_profile = player_profiles.get(left_player)
+                    right_profile = player_profiles.get(right_player)
+
+                    def split_text(side_profile, key):
+                        return (
+                            "-"
+                            if side_profile is None
+                            else f"{side_profile[key]:.0%}"
+                        )
+
+                    left_ordinary_text = split_text(
+                        left_profile, "ordinary_beat"
                     )
+                    left_bomb_text = split_text(left_profile, "bomb_only")
+                    right_ordinary_text = split_text(
+                        right_profile, "ordinary_beat"
+                    )
+                    right_bomb_text = split_text(right_profile, "bomb_only")
+
                     enriched_actions.append(
                         (
                             action_text,
                             score_text,
                             total_text,
-                            ordinary_text,
-                            bomb_text,
+                            left_ordinary_text,
+                            left_bomb_text,
+                            right_ordinary_text,
+                            right_bomb_text,
                             model_rank,
                         )
                     )
@@ -370,6 +390,16 @@ class WorkerThread(QThread):
                         "model_rank": model_rank,
                         "model_score": float(score_text),
                         "response_profile": profile,
+                        "physical_sides": {
+                            "left": {
+                                "player": left_player,
+                                "profile": left_profile,
+                            },
+                            "right": {
+                                "player": right_player,
+                                "profile": right_profile,
+                            },
+                        },
                     })
 
                 self.action_list = enriched_actions
@@ -377,9 +407,16 @@ class WorkerThread(QThread):
                 douzero_paused_reason = None
 
                 if enriched_actions:
-                    action_text, score_text, total_text, ordinary_text, bomb_text, _ = (
-                        enriched_actions[0]
-                    )
+                    (
+                        action_text,
+                        score_text,
+                        total_text,
+                        left_ordinary_text,
+                        left_bomb_text,
+                        right_ordinary_text,
+                        right_bomb_text,
+                        _,
+                    ) = enriched_actions[0]
                     shown = (
                         "不出"
                         if action_text == "Pass"
@@ -387,8 +424,9 @@ class WorkerThread(QThread):
                     )
                     print(
                         f"DouZero建议 >>> {shown} "
-                        f"(模型分 {score_text}，总可压 {total_text}，"
-                        f"普通可压 {ordinary_text}，仅炸可压 {bomb_text})"
+                        f"(模型分 {score_text}，敌方总可压 {total_text}；"
+                        f"左 普{left_ordinary_text}/炸{left_bomb_text}；"
+                        f"右 普{right_ordinary_text}/炸{right_bomb_text})"
                     )
 
                 if top_actions:
