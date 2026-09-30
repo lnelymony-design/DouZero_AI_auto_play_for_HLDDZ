@@ -1,0 +1,40 @@
+name: Replay suggestion lambda evaluation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tools/replay_fixtures/**"
+      - "tools/evaluate_replay_suggestions.py"
+      - "inference/**"
+      - "douzero/**"
+      - "baselines/resnet/**"
+      - ".github/workflows/replay-suggestion-eval.yml"
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install evaluator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "numpy==1.23.5" "torch==2.0.1"
+      - name: Compare lambda values
+        run: |
+          python tools/evaluate_replay_suggestions.py \
+            tools/replay_fixtures/game_01.replay.json \
+            tools/replay_fixtures/game_02.replay.json \
+            tools/replay_fixtures/game_03.replay.json \
+            --weights 0.20 0.30 0.40 \
+            --samples 1000 \
+            --min-ess 0.40 | tee lambda-eval.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-eval
+          path: lambda-eval.txt

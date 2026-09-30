@@ -1,0 +1,170 @@
+{
+  "format": "wechat_replay_v1",
+  "video": "腾讯欢乐斗地主 2026-09-30 17-51-11.mp4",
+  "sample_seconds": 0.35,
+  "actions": [
+    [
+      0,
+      "INIT",
+      1,
+      "D22AKKQQJT9988777654",
+      "DQ7",
+      {
+        "left": 17,
+        "right": 17
+      }
+    ],
+    [
+      1,
+      "me",
+      "7"
+    ],
+    [
+      2,
+      "right",
+      "9"
+    ],
+    [
+      3,
+      "left",
+      "T"
+    ],
+    [
+      4,
+      "me",
+      "Q"
+    ],
+    [
+      5,
+      "right",
+      "PASS"
+    ],
+    [
+      6,
+      "left",
+      "2"
+    ],
+    [
+      7,
+      "me",
+      "PASS"
+    ],
+    [
+      8,
+      "right",
+      "PASS"
+    ],
+    [
+      9,
+      "left",
+      "76543"
+    ],
+    [
+      10,
+      "me",
+      "PASS"
+    ],
+    [
+      11,
+      "right",
+      "PASS"
+    ],
+    [
+      12,
+      "left",
+      "JJ"
+    ],
+    [
+      13,
+      "me",
+      "KK"
+    ],
+    [
+      14,
+      "right",
+      "PASS"
+    ],
+    [
+      15,
+      "left",
+      "PASS"
+    ],
+    [
+      16,
+      "me",
+      "987654"
+    ],
+    [
+      17,
+      "right",
+      "PASS"
+    ],
+    [
+      18,
+      "left",
+      "PASS"
+    ],
+    [
+      19,
+      "me",
+      "QJT987"
+    ],
+    [
+      20,
+      "right",
+      "PASS"
+    ],
+    [
+      21,
+      "left",
+      "PASS"
+    ],
+    [
+      22,
+      "me",
+      "A"
+    ],
+    [
+      23,
+      "right",
+      "X"
+    ],
+    [
+      24,
+      "left",
+      "PASS"
+    ],
+    [
+      25,
+      "me",
+      "D"
+    ],
+    [
+      26,
+      "right",
+      "PASS"
+    ],
+    [
+      27,
+      "left",
+      "PASS"
+    ],
+    [
+      28,
+      "me",
+      "22"
+    ]
+  ],
+  "issues": [],
+  "summary": {
+    "position_code": 1,
+    "bottom_cards": "DQ7",
+    "tracked_remaining": {
+      "left": 8,
+      "right": 15
+    },
+    "my_remaining": 0,
+    "confirmed_my_hand": ""
+  },
+  "regression": null
+}
