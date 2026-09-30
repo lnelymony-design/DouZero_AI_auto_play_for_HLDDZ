@@ -24,6 +24,9 @@ class Config:
     inference_play_behavior_strength: float
     inference_behavior_temperature: float
     inference_min_effective_sample_ratio: float
+    inference_residual_behavior_floor: float
+    inference_residual_behavior_strength: float
+    inference_residual_behavior_temperature: float
     risk_adjustment_enabled: bool
     risk_adjustment_weight: float
     risk_adjustment_min_ess_ratio: float
@@ -55,6 +58,9 @@ class Config:
         self.inference_play_behavior_strength = kwargs.get('inference_play_behavior_strength', 1.0)
         self.inference_behavior_temperature = kwargs.get('inference_behavior_temperature', 0.75)
         self.inference_min_effective_sample_ratio = kwargs.get('inference_min_effective_sample_ratio', 0.28)
+        self.inference_residual_behavior_floor = kwargs.get('inference_residual_behavior_floor', 0.35)
+        self.inference_residual_behavior_strength = kwargs.get('inference_residual_behavior_strength', 1.0)
+        self.inference_residual_behavior_temperature = kwargs.get('inference_residual_behavior_temperature', 0.55)
         self.risk_adjustment_enabled = kwargs.get('risk_adjustment_enabled', False)
         self.risk_adjustment_weight = kwargs.get('risk_adjustment_weight', 0.45)
         self.risk_adjustment_min_ess_ratio = kwargs.get('risk_adjustment_min_ess_ratio', 0.45)
