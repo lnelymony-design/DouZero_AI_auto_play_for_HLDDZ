@@ -59,6 +59,6 @@
     "inference_behavior_temperature": 0.75,
     "inference_min_effective_sample_ratio": 0.28,
     "risk_adjustment_enabled": true,
-    "risk_adjustment_weight": 0.3,
+    "risk_adjustment_weight": 0.45,
     "risk_adjustment_min_ess_ratio": 0.4
 }
