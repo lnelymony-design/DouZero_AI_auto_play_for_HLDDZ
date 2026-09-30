@@ -35,6 +35,7 @@ class WorkerThread(QThread):
     game_win_rate_signal = pyqtSignal(float)
     played_card_signal = pyqtSignal(list)
     hand_inference_signal = pyqtSignal(dict)
+    remaining_count_signal = pyqtSignal(dict)
 
     def __init__(self, automatic_mode, bid_threshold, redouble_threshold, super_redouble_threshold, mingpai_threshold):
         super(WorkerThread, self).__init__()
@@ -192,6 +193,9 @@ class WorkerThread(QThread):
         wechat_other_hands_cards_str = ""
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
+        tracked_remaining = {"left": None, "right": None}
+        observed_remaining = {"left": None, "right": None}
+        count_desync = {"left": False, "right": False}
 
         def display_cards(cards):
             if not cards:
@@ -219,6 +223,22 @@ class WorkerThread(QThread):
                 return PlayerPosition[(self.my_position_code + 2) % 3]
             return None
 
+        def emit_remaining_counts():
+            result = {}
+            for side in ("left", "right"):
+                player = player_for_side(side)
+                value = observed_remaining[side]
+                if value is None:
+                    value = tracked_remaining[side]
+                if player is not None and value is not None:
+                    result[player] = {
+                        "count": int(value),
+                        "observed": observed_remaining[side] is not None,
+                        "desync": bool(count_desync[side]),
+                    }
+            if result:
+                self.remaining_count_signal.emit(result)
+
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal wechat_other_hands_cards_str
@@ -233,6 +253,13 @@ class WorkerThread(QThread):
                 my_hand_cards=my_hand,
                 three_landlord_cards=three_cards,
             )
+
+            landlord_side = landlord_start_side[position_code]
+            for side in ("left", "right"):
+                tracked_remaining[side] = 20 if side == landlord_side else 17
+                observed_remaining[side] = None
+                count_desync[side] = False
+            emit_remaining_counts()
 
             remaining = list(AllEnvCard)
             for card in [RealCard2EnvCard[ch] for ch in my_hand]:
@@ -397,9 +424,29 @@ class WorkerThread(QThread):
                                     wechat_other_hands_cards_str
                                 )
 
+                                if tracked_remaining[expected_side] is not None:
+                                    tracked_remaining[expected_side] = max(
+                                        0,
+                                        tracked_remaining[expected_side] - len(stable_play),
+                                    )
+                                    emit_remaining_counts()
+
                             self.record_hand_inference_action(player, stable_play)
-                            expected_side = side_cycle[expected_side]
-                            action_accepted = True
+
+                            if (
+                                expected_side in ("left", "right")
+                                and tracked_remaining[expected_side] == 0
+                            ):
+                                print(
+                                    f"微信牌局 >>> {label_map[expected_side]}后剩余 0 张，"
+                                    "本局结束"
+                                )
+                                round_initialized = False
+                                expected_side = None
+                                action_accepted = True
+                            else:
+                                expected_side = side_cycle[expected_side]
+                                action_accepted = True
 
                 passes = recognizer.detect_pass_sides(screenshot)
                 stable_passes = stable_value("passes", frozenset(passes), frames=2)
@@ -423,6 +470,47 @@ class WorkerThread(QThread):
                             self.record_hand_inference_action(player, "")
                             expected_side = side_cycle[expected_side]
                     last_state["passes"] = stable_passes
+
+                if round_initialized:
+                    for side, label in (("left", "左侧"), ("right", "右侧")):
+                        raw_count = recognizer.recognize_remaining_count(
+                            screenshot,
+                            side,
+                            expected=tracked_remaining[side],
+                        )
+                        stable_count = stable_value(
+                            f"{side}_remaining_count", raw_count, frames=2
+                        )
+                        if stable_count is None:
+                            continue
+
+                        previous_observed = observed_remaining[side]
+                        if previous_observed == stable_count:
+                            continue
+
+                        observed_remaining[side] = stable_count
+                        state_count = tracked_remaining[side]
+                        count_desync[side] = (
+                            state_count is not None and state_count != stable_count
+                        )
+
+                        if count_desync[side]:
+                            print(
+                                f"剩余张数校验 >>> {label}实测 {stable_count} 张，"
+                                f"动作历史推算 {state_count} 张 [状态不同步]"
+                            )
+                            # Use the visual count for turn/end tracking, but do not
+                            # invent missing card identities for the probability model.
+                            tracked_remaining[side] = stable_count
+                        else:
+                            print(f"剩余张数 >>> {label}: {stable_count}")
+
+                        emit_remaining_counts()
+
+                        if stable_count == 0:
+                            print(f"微信牌局 >>> {label}剩余 0 张，本局结束")
+                            round_initialized = False
+                            expected_side = None
 
             except Exception as exc:
                 print(f"微信牌局接入异常（不会退出线程）: {exc}")
