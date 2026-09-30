@@ -273,12 +273,29 @@ class HudOverlayManager(QtCore.QObject):
             return
 
         counts = Counter(remaining_cards)
-        parts = []
-        for card in RealCards:
-            n = counts.get(card, 0)
-            name = DISPLAY_CARD.get(card, card)
-            parts.append(f"{name}{n}")
-        self.panels["counter"].set_body("  ".join(parts))
+        short_names = {
+            "D": "大",
+            "X": "小",
+            "T": "10",
+        }
+        names = [short_names.get(card, card) for card in RealCards]
+        values = [str(counts.get(card, 0)) for card in RealCards]
+
+        # Use a tiny HTML table so every count sits directly below its rank.
+        # This is much easier to scan during a 30-second turn than a single row.
+        name_cells = "".join(
+            f'<td align="center"><b>{name}</b></td>' for name in names
+        )
+        value_cells = "".join(
+            f'<td align="center">{value}</td>' for value in values
+        )
+        html = (
+            '<table width="100%" cellspacing="0" cellpadding="0">'
+            f"<tr>{name_cells}</tr>"
+            f"<tr>{value_cells}</tr>"
+            "</table>"
+        )
+        self.panels["counter"].set_body(html)
 
     def update_suggestion(self, result):
         panel = self.panels["suggestion"]
