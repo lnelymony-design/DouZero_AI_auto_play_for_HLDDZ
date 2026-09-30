@@ -46,6 +46,7 @@ class WechatCardRecognizer:
         self.pass_template = self._decode_template(
             _PASS_TEMPLATE_B64, (40, 104)
         )
+        self.last_bottom_debug = []
 
     @staticmethod
     def _decode_template(data, shape):
@@ -438,27 +439,177 @@ class WechatCardRecognizer:
         )
         return self._merge_cards(normal, jokers)
 
+    def _recognize_bottom_low_contrast_slot(
+        self, bgr, region, score_threshold=0.62
+    ):
+        """Recover a grey/faded bottom-card rank inside one known card slot.
+
+        The miniapp sometimes renders one of the three landlord cards with a
+        low-contrast grey rank during/after the doubling animation.  The normal
+        ink mask intentionally ignores such light grey pixels because doing so
+        globally would also pull in blue table texture.  Here the crop is
+        restricted to one white card slot, so an achromatic local threshold is
+        safe.
+        """
+        height, width = bgr.shape[:2]
+        x0 = int(region[0] * width)
+        x1 = int(region[1] * width)
+        y0 = int(region[2] * height)
+        y1 = int(region[3] * height)
+
+        roi = bgr[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+
+        # Grey ranks are around 210-225 on the captured 1291x770 client while
+        # the card face is close to white.  Ignore saturated blue background,
+        # but retain red ranks as usual.
+        achromatic_ink = (sat < 120) & (gray < 230)
+        red_ink = (
+            (sat > 90)
+            & (val > 70)
+            & ((hue < 15) | (hue > 170))
+        )
+        mask = ((achromatic_ink | red_ink).astype(np.uint8) * 255)
+
+        count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        components = []
+        for index in range(1, count):
+            x, y, w, h, area = [int(v) for v in stats[index]]
+            if (
+                self._scaled(10, height, REFERENCE_HEIGHT)
+                <= h
+                <= self._scaled(30, height, REFERENCE_HEIGHT)
+                and self._scaled(3, width, REFERENCE_WIDTH)
+                <= w
+                <= self._scaled(28, width, REFERENCE_WIDTH)
+                and area >= self._scaled(20, width, REFERENCE_WIDTH)
+            ):
+                components.append((x, y, w, h, area))
+
+        candidates = []
+        for x, y, w, h, area in components:
+            normalized = self._normalize_mask(
+                mask[y:y + h, x:x + w]
+            )
+            rank, score = self._classify_rank(normalized)
+            if rank is not None:
+                candidates.append((score, rank, x + x0))
+
+        # "10" is the only rank made from two disconnected glyphs.  Pair only
+        # within this single card slot, so neighbouring bottom cards can never
+        # be accidentally fused into a fake "10".
+        ordered = sorted(components, key=lambda item: item[0])
+        max_center_y_delta = self._scaled(4, height, REFERENCE_HEIGHT)
+        max_pair_dx = self._scaled(22, width, REFERENCE_WIDTH)
+        max_pair_gap = self._scaled(4, width, REFERENCE_WIDTH)
+        for i, first in enumerate(ordered):
+            for second in ordered[i + 1:i + 3]:
+                cy1 = first[1] + first[3] / 2
+                cy2 = second[1] + second[3] / 2
+                gap = second[0] - (first[0] + first[2])
+                if (
+                    abs(cy1 - cy2) <= max_center_y_delta
+                    and gap <= max_pair_gap
+                    and second[0] - first[0] <= max_pair_dx
+                ):
+                    left = min(first[0], second[0])
+                    top = min(first[1], second[1])
+                    right = max(
+                        first[0] + first[2],
+                        second[0] + second[2],
+                    )
+                    bottom = max(
+                        first[1] + first[3],
+                        second[1] + second[3],
+                    )
+                    normalized = self._normalize_mask(
+                        mask[top:bottom, left:right]
+                    )
+                    rank, score = self._classify_rank(normalized)
+                    if rank is not None:
+                        candidates.append((score, rank, left + x0))
+
+        if not candidates:
+            return None
+
+        score, rank, x = max(candidates, key=lambda item: item[0])
+        if score < score_threshold:
+            return None
+        return (x, rank, score)
+
     def recognize_bottom_cards(self, image):
         bgr = self._to_bgr(image)
         if bgr is None:
+            self.last_bottom_debug = []
             return ""
 
-        # 1291x770 WeChat layout: the three landlord cards are centered around
-        # x ~= 0.46..0.53.  The previous crop started at x=0.49, which cut off
-        # the first two cards in samples such as 9-6-3 and left only the final
-        # "3".  Keep the normal-rank band vertically tight so the multiplier
-        # badge below the cards is not treated as a fourth rank.
-        normal = self._recognize_rank_band(
-            bgr,
-            region=(0.455, 0.545, 0.055, 0.115),
-            min_h_ref=24,
-            max_h_ref=46,
-            min_area_ref=90,
-            score_threshold=0.62,
+        # The three landlord cards overlap and their rank glyphs are only about
+        # 28-30 px apart.  Running the generic whole-band recognizer across all
+        # three cards can mistakenly combine ranks from adjacent cards as the
+        # two glyphs of "10".  Scan three fixed physical card slots instead.
+        slot_regions = (
+            (0.455, 0.479, 0.068, 0.110),
+            (0.477, 0.502, 0.068, 0.110),
+            (0.500, 0.527, 0.068, 0.110),
         )
+        faded_regions = (
+            (0.455, 0.479, 0.073, 0.110),
+            (0.477, 0.502, 0.073, 0.110),
+            (0.500, 0.527, 0.073, 0.110),
+        )
+
+        normal = []
+        debug = []
+        for slot_index, (region, faded_region) in enumerate(
+            zip(slot_regions, faded_regions), start=1
+        ):
+            found = self._recognize_rank_band(
+                bgr,
+                region=region,
+                min_h_ref=18,
+                max_h_ref=32,
+                min_area_ref=40,
+                score_threshold=0.58,
+            )
+
+            source = "normal"
+            candidate = (
+                max(found, key=lambda item: item[2])
+                if found else None
+            )
+            if candidate is None:
+                candidate = self._recognize_bottom_low_contrast_slot(
+                    bgr, faded_region, score_threshold=0.62
+                )
+                source = "faded" if candidate is not None else "miss"
+
+            if candidate is not None:
+                normal.append(candidate)
+                debug.append({
+                    "slot": slot_index,
+                    "rank": candidate[1],
+                    "score": round(float(candidate[2]), 3),
+                    "source": source,
+                })
+            else:
+                debug.append({
+                    "slot": slot_index,
+                    "rank": None,
+                    "score": None,
+                    "source": "miss",
+                })
+
         jokers = self._detect_jokers(
             bgr, region=(0.45, 0.55, 0.05, 0.18)
         )
+        self.last_bottom_debug = debug
         return self._merge_cards(normal, jokers)
 
     def recognize_left_played(self, image, expected_count=None):
