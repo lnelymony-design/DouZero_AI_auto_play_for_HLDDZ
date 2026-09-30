@@ -52,7 +52,7 @@ class Config:
         self.inference_behavior_temperature = kwargs.get('inference_behavior_temperature', 0.75)
         self.inference_min_effective_sample_ratio = kwargs.get('inference_min_effective_sample_ratio', 0.28)
         self.risk_adjustment_enabled = kwargs.get('risk_adjustment_enabled', True)
-        self.risk_adjustment_weight = kwargs.get('risk_adjustment_weight', 0.30)
+        self.risk_adjustment_weight = kwargs.get('risk_adjustment_weight', 0.45)
         self.risk_adjustment_min_ess_ratio = kwargs.get('risk_adjustment_min_ess_ratio', 0.40)
     
     @classmethod
