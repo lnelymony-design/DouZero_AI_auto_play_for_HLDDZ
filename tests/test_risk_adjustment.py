@@ -55,6 +55,18 @@ class RiskAdjustmentTests(unittest.TestCase):
         self.assertGreater(pass_item.adjusted_score, 0.0)
         self.assertLess(pass_item.adjusted_score, 100.0)
 
+    def test_worst_model_candidate_cannot_win_on_safety_alone(self):
+        result = adjust_candidates(
+            [
+                ("model_top", 1.0, 1.0),
+                ("middle", 0.5, 0.5),
+                ("model_bottom", 0.0, 0.0),
+            ],
+            weight=99.0,
+        )
+        winner = next(item for item in result if item.adjusted_rank == 1)
+        self.assertEqual(winner.action, "model_top")
+
     def test_weight_is_clamped_below_full_replacement(self):
         result = adjust_candidates(
             [
@@ -65,7 +77,7 @@ class RiskAdjustmentTests(unittest.TestCase):
             weight=5.0,
         )
         # The function accepts the request but caps the heuristic contribution
-        # at 80%, so the model component is never literally discarded.
+        # below 50%, so DouZero remains the majority signal.
         top = next(item for item in result if item.adjusted_rank == 1)
         self.assertEqual(top.action, "K")
 
