@@ -15,5 +15,7 @@ jobs:
           python-version: "3.11"
       - name: Install minimal test dependency
         run: python -m pip install numpy
+      - name: Compile changed Python entry points
+        run: python -m py_compile config.py helpers/ScreenHelper.py helpers/ImageLocator.py worker.py main_window.py
       - name: Run hand inference unit tests
         run: python -m unittest tests/test_hand_inference.py
