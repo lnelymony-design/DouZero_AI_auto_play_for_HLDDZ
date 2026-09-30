@@ -733,11 +733,29 @@ class HandInferenceEngine:
         self._latest_total_weight = total_weight
 
         result = {}
+        prior_denominator = max(1, len(sampled_hands))
         for player in self.opponents:
             rank_stats = {
-                c: {"one_plus": 0.0, "pair_plus": 0.0, "triple_plus": 0.0, "bomb": 0.0}
+                c: {
+                    "one_plus": 0.0,
+                    "pair_plus": 0.0,
+                    "triple_plus": 0.0,
+                    "bomb": 0.0,
+                    "prior_one_plus": 0.0,
+                    "behavior_delta": 0.0,
+                }
                 for c in CARD_ORDER
             }
+
+            # Uniform legal-allocation baseline before either behavior stage.
+            for hands in sampled_hands:
+                prior_counts = Counter(hands[player])
+                for card in CARD_ORDER:
+                    if prior_counts[card] >= 1:
+                        rank_stats[card]["prior_one_plus"] += (
+                            1.0 / prior_denominator
+                        )
+
             any_bomb = 0.0
             rocket = 0.0
             hand_mass = defaultdict(float)
@@ -765,6 +783,12 @@ class HandInferenceEngine:
 
                 hand_mass[_sorted_cards(hands[player])] += p
 
+            for card in CARD_ORDER:
+                rank_stats[card]["behavior_delta"] = (
+                    rank_stats[card]["one_plus"]
+                    - rank_stats[card]["prior_one_plus"]
+                )
+
             top_hands = sorted(hand_mass.items(), key=lambda x: x[1], reverse=True)[:5]
             result[player] = {
                 "remaining_count": remaining_counts[player],
@@ -787,6 +811,21 @@ class HandInferenceEngine:
                 "top_sampled_hands": [
                     {"hand": hand, "probability": round(prob, 4)}
                     for hand, prob in top_hands
+                ],
+                "top_behavior_shifts": [
+                    {
+                        "card": card,
+                        "prior": round(rank_stats[card]["prior_one_plus"], 4),
+                        "posterior": round(rank_stats[card]["one_plus"], 4),
+                        "delta": round(rank_stats[card]["behavior_delta"], 4),
+                    }
+                    for card in sorted(
+                        CARD_ORDER,
+                        key=lambda c: abs(
+                            rank_stats[c]["behavior_delta"]
+                        ),
+                        reverse=True,
+                    )[:5]
                 ],
             }
 
