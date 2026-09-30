@@ -340,15 +340,49 @@ class WorkerThread(QThread):
                 screenshot_saved = True
 
             try:
-                my_hand_raw = recognizer.recognize_my_hand(screenshot)
+                landlord_side = recognizer.detect_landlord_side(screenshot)
+                position_map = {"right": 0, "me": 1, "left": 2}
+                position_code = stable_value(
+                    "position_code", position_map.get(landlord_side)
+                )
+                if (
+                    position_code is not None
+                    and position_code != last_state["position_code"]
+                ):
+                    position_text = {
+                        0: "农民（地主上家）",
+                        1: "地主",
+                        2: "农民（地主下家）",
+                    }[position_code]
+                    print(f"微信专用识牌 >>> 我的身份: {position_text}")
+                    last_state["position_code"] = position_code
+
+                role_is_landlord = (
+                    last_state["position_code"] == 1 or landlord_side == "me"
+                )
+                my_hand_raw = recognizer.recognize_my_hand(
+                    screenshot, is_landlord=role_is_landlord
+                )
                 my_hand = stable_value("my_hand", my_hand_raw, frames=5)
                 pending_my_action = None
                 if my_hand is not None and my_hand:
-                    if my_hand != last_state["my_hand"]:
-                        print(
-                            f"微信专用识牌 >>> 我的手牌({len(my_hand)}): "
-                            f"{display_cards(my_hand)}"
+                    expected_preinit_count = (
+                        20 if last_state["position_code"] == 1 else 17
+                        if last_state["position_code"] is not None else None
+                    )
+                    should_publish_hand = (
+                        round_initialized
+                        or (
+                            expected_preinit_count is not None
+                            and len(my_hand) == expected_preinit_count
                         )
+                    )
+                    if my_hand != last_state["my_hand"]:
+                        if should_publish_hand:
+                            print(
+                                f"微信专用识牌 >>> 我的手牌({len(my_hand)}): "
+                                f"{display_cards(my_hand)}"
+                            )
                         last_state["my_hand"] = my_hand
 
                     if round_initialized and confirmed_my_hand and my_hand != confirmed_my_hand:
@@ -375,23 +409,6 @@ class WorkerThread(QThread):
                         )
                         last_state["three_cards"] = three_cards
                         self.three_cards_signal.emit(three_cards)
-
-                landlord_side = recognizer.detect_landlord_side(screenshot)
-                position_map = {"right": 0, "me": 1, "left": 2}
-                position_code = stable_value(
-                    "position_code", position_map.get(landlord_side)
-                )
-                if (
-                    position_code is not None
-                    and position_code != last_state["position_code"]
-                ):
-                    position_text = {
-                        0: "农民（地主上家）",
-                        1: "地主",
-                        2: "农民（地主下家）",
-                    }[position_code]
-                    print(f"微信专用识牌 >>> 我的身份: {position_text}")
-                    last_state["position_code"] = position_code
 
                 ready_hand = last_state["my_hand"] or ""
                 ready_three = last_state["three_cards"] or ""
