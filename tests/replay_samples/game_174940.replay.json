@@ -1,0 +1,8 @@
+{
+  "format": "wechat_replay_v1",
+  "video": "腾讯欢乐斗地主 2026-09-30 17-49-40.mp4",
+  "sample_seconds": 0.35,
+  "actions": [[18.57,"INIT",2,"DAAKKKQQJJT544333","A77",{"left":20,"right":17}],[31.67,"left","77",18,"count"],[34.59,"me","JJ",15],[36.04,"right","PASS","visual"],[38.95,"left","QQ",16,"count"],[41.14,"me","AA",13],[42.23,"right","PASS","visual"],[44.42,"left","PASS","visual"],[46.96,"me","44333",8],[48.78,"right","PASS","visual"],[52.79,"left","TTT88",11,"count"],[53.52,"me","KKKQQ",3],[55.34,"right","PASS","visual"],[56.43,"left","PASS","visual"],[57.89,"me","5",2],[60.43,"right","A",16,"count"],[63.35,"left","PASS","visual"],[65.9,"me","PASS","visual"],[68.81,"right","876543",10,"count"],[72.45,"left","987654",5,"count"],[77.91,"me","PASS","inferred"],[77.91,"right","PASS","inferred"],[77.91,"left","A",4,"count"],[79.73,"me","D",1],[80.82,"right","PASS","visual"],[81.91,"left","PASS","visual"],[83.01,"me","T",0]],
+  "issues": [],
+  "summary": {"position_code":2,"bottom_cards":"A77","tracked_remaining":{"left":4,"right":10},"my_remaining":0,"confirmed_my_hand":""}
+}
