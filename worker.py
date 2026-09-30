@@ -325,7 +325,11 @@ class WorkerThread(QThread):
                 )
                 self.action_message = action_message
 
-                candidate_pool = action_list[:6]
+                # Risk is a tie-breaker among DouZero's credible choices, not
+                # a replacement model.  Restrict adjustment to the raw top 3;
+                # replay calibration showed that allowing ranks 4-6 can promote
+                # a strategically weak action solely because it is hard to beat.
+                candidate_pool = action_list[:3]
                 candidate_triplets = []
                 for action_text, score_text in candidate_pool:
                     risk = None
@@ -364,11 +368,6 @@ class WorkerThread(QThread):
                 )
 
                 display_ranks = [1, 2, 3]
-                if (
-                    adjusted_winner is not None
-                    and adjusted_winner.model_rank > 3
-                ):
-                    display_ranks.append(adjusted_winner.model_rank)
 
                 enriched_actions = []
                 for model_rank in display_ranks:
