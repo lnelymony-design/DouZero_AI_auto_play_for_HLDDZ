@@ -489,10 +489,13 @@ def simulate(video_path, sample_seconds=0.35):
         if (
             not self_removed
             and confirmed_hand
-            and hand_missing >= 4
+            and expected_side == "me"
         ):
-            final_cards = recognizer.recognize_my_played(
+            raw_final = recognizer.recognize_my_played(
                 image, expected_count=len(confirmed_hand)
+            )
+            final_cards = stable(
+                "my_final_play", raw_final, frames=2
             )
             if (
                 final_cards
