@@ -12,7 +12,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_width = 778
         self.max_height = 650
 
-        self.setWindowTitle("QQ 游戏大厅 - 欢乐斗地主 AI 辅助")
+        if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
+            self.setWindowTitle("微信小程序 - 欢乐斗地主 AI 辅助")
+        else:
+            self.setWindowTitle("QQ 游戏大厅 - 欢乐斗地主 AI 辅助")
         self.setGeometry(320, 160, self.max_width, self.max_height)
         self.setWindowFlags(QtCore.Qt.Window | QtCore.Qt.CustomizeWindowHint | QtCore.Qt.WindowTitleHint | QtCore.Qt.WindowCloseButtonHint)
 
@@ -32,7 +35,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.redouble_threshold = 0.65
         self.super_redouble_threshold = 0.7
         self.mingpai_threshold = 0.95
-        self.automatic_mode = AutomaticModeEnum.FULL.value
+        if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
+            self.automatic_mode = AutomaticModeEnum.MANUAL.value
+        else:
+            self.automatic_mode = AutomaticModeEnum.FULL.value
         self.screenHelper.setWindowSize()
 
     # 禁用窗口拖拽和缩放
@@ -86,12 +92,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self.startBtn.setText("停止")
             self.set_status(True)
         else:
-            self.workerThread.stop_task()
-            self.workerThread.quit()
-            self.workerThread.wait()
-            self.workerThread = None
-            self.startBtn.setText("启动")
-            self.set_status(False)
+            self.stop_worker_thread()
+
+    def stop_worker_thread(self):
+        if self.workerThread is None:
+            return
+
+        self.workerThread.stop_task()
+        if self.workerThread.isRunning():
+            self.workerThread.wait(3000)
+
+        # The worker normally stops cooperatively. Keep a bounded fallback so a
+        # recognition loop can never make the GUI impossible to close again.
+        if self.workerThread.isRunning():
+            print("工作线程未在 3 秒内停止，正在强制结束...")
+            self.workerThread.terminate()
+            self.workerThread.wait(1000)
+
+        self.workerThread = None
+        self.startBtn.setText("启动")
+        self.set_status(False)
+
+    def closeEvent(self, event):
+        self.stop_worker_thread()
+        event.accept()
 
     def handle_card_recorder_update(self, result):
         font = QtGui.QFont("微软雅黑", 10, QtGui.QFont.Bold)
@@ -768,9 +792,12 @@ class MainWindow(QtWidgets.QMainWindow):
         font = QtGui.QFont("微软雅黑", 9)
 
         self.cbMode = QtWidgets.QComboBox()
-        self.cbMode.addItem("全自动模式", AutomaticModeEnum.FULL.value)
-        self.cbMode.addItem("半自动模式", AutomaticModeEnum.SEMI.value)
-        self.cbMode.addItem("手动模式", AutomaticModeEnum.MANUAL.value)
+        if getattr(self.screenHelper.config, 'platform', '') == 'wechat_miniapp':
+            self.cbMode.addItem("微信只读模式", AutomaticModeEnum.MANUAL.value)
+        else:
+            self.cbMode.addItem("全自动模式", AutomaticModeEnum.FULL.value)
+            self.cbMode.addItem("半自动模式", AutomaticModeEnum.SEMI.value)
+            self.cbMode.addItem("手动模式", AutomaticModeEnum.MANUAL.value)
         self.cbMode.setFont(font)
         self.cbMode.setFixedWidth(140)
         self.cbMode.setFixedHeight(40)
