@@ -463,10 +463,17 @@ class MainWindow(QtWidgets.QMainWindow):
             for info in self.observedRemainingCounts.values()
         )
         status = "状态需校验" if desync else "状态正常"
-        effective = result.get("effective_samples", "-")
+        ess_ratio = result.get("effective_sample_ratio")
+        ess_text = "-" if ess_ratio is None else f"{ess_ratio:.0%}"
         self.inferenceMetaLabel.setText(
-            f"样本 {result.get('samples', '-')} / 有效 {effective} · "
-            f"Pass {result.get('pass_evidence_count', 0)} · {status}"
+            f"样本 {result.get('samples', '-')} · "
+            f"实出 {result.get('play_evidence_count', 0)} · "
+            f"Pass {result.get('pass_evidence_count', 0)} · "
+            f"ESS {ess_text} · {status}"
+        )
+        self.inferenceMetaLabel.setToolTip(
+            "ESS是有效样本比例：越高表示当前概率由更多不同隐藏手牌共同支持；"
+            "越低表示少量样本权重过高，概率应更谨慎解读。"
         )
 
         self._refresh_inference_side_labels()
