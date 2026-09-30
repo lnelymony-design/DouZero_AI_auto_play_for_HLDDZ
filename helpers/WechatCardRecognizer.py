@@ -443,16 +443,21 @@ class WechatCardRecognizer:
         if bgr is None:
             return ""
 
+        # 1291x770 WeChat layout: the three landlord cards are centered around
+        # x ~= 0.46..0.53.  The previous crop started at x=0.49, which cut off
+        # the first two cards in samples such as 9-6-3 and left only the final
+        # "3".  Keep the normal-rank band vertically tight so the multiplier
+        # badge below the cards is not treated as a fourth rank.
         normal = self._recognize_rank_band(
             bgr,
-            region=(0.49, 0.60, 0.06, 0.16),
+            region=(0.455, 0.545, 0.055, 0.115),
             min_h_ref=24,
             max_h_ref=46,
             min_area_ref=90,
             score_threshold=0.62,
         )
         jokers = self._detect_jokers(
-            bgr, region=(0.49, 0.60, 0.055, 0.18)
+            bgr, region=(0.45, 0.55, 0.05, 0.18)
         )
         return self._merge_cards(normal, jokers)
 
