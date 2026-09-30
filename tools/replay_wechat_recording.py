@@ -757,6 +757,14 @@ def main():
         help="Frame sampling interval; default matches live polling closely.",
     )
     parser.add_argument(
+        "--json-dir",
+        default=None,
+        help=(
+            "Optional directory for structured replay JSON. "
+            "Useful for offline decision-model comparisons."
+        ),
+    )
+    parser.add_argument(
         "--truth-file",
         default=os.path.join(
             os.path.dirname(__file__),
@@ -792,6 +800,7 @@ def main():
             for issue in issues:
                 print(issue)
 
+        regression = None
         truth = truth_by_name.get(basename)
         if truth:
             regression = compare_truth(
@@ -827,6 +836,26 @@ def main():
             total_count_cases += regression["count_total"]
             total_hand_hits += regression["hand_hits"]
             total_hand_cases += regression["hand_total"]
+
+        if args.json_dir:
+            os.makedirs(args.json_dir, exist_ok=True)
+            stem, _ = os.path.splitext(basename)
+            output_path = os.path.join(
+                args.json_dir,
+                f"{stem}.replay.json",
+            )
+            payload = {
+                "format": "wechat_replay_v1",
+                "video": basename,
+                "sample_seconds": max(0.20, args.sample_seconds),
+                "actions": actions,
+                "issues": issues,
+                "summary": summary,
+                "regression": regression,
+            }
+            with open(output_path, "w", encoding="utf-8") as fp:
+                json.dump(payload, fp, ensure_ascii=False, indent=2)
+            print("REPLAY JSON", output_path)
 
     if total_count_cases:
         print(
