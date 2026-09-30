@@ -465,15 +465,22 @@ class MainWindow(QtWidgets.QMainWindow):
         status = "状态需校验" if desync else "状态正常"
         ess_ratio = result.get("effective_sample_ratio")
         ess_text = "-" if ess_ratio is None else f"{ess_ratio:.0%}"
+        if ess_ratio is None:
+            sample_quality = "-"
+        elif ess_ratio >= 0.65:
+            sample_quality = "高"
+        elif ess_ratio >= 0.40:
+            sample_quality = "中"
+        else:
+            sample_quality = "低"
         self.inferenceMetaLabel.setText(
-            f"样本 {result.get('samples', '-')} · "
-            f"实出 {result.get('play_evidence_count', 0)} · "
-            f"Pass {result.get('pass_evidence_count', 0)} · "
-            f"ESS {ess_text} · {status}"
+            f"行为证据 {result.get('play_evidence_count', 0)}+{result.get('pass_evidence_count', 0)} · "
+            f"ESS {ess_text} · 样本质量 {sample_quality} · {status}"
         )
         self.inferenceMetaLabel.setToolTip(
-            "ESS是有效样本比例：越高表示当前概率由更多不同隐藏手牌共同支持；"
-            "越低表示少量样本权重过高，概率应更谨慎解读。"
+            "行为证据=已记录的实际出牌数+Pass数。\n"
+            "ESS=有效样本比例，衡量蒙特卡洛权重是否集中在少数隐藏手牌。\n"
+            "“样本质量”只描述采样稳定性，不是预测准确率，也不是胜率。"
         )
 
         self._refresh_inference_side_labels()
