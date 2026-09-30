@@ -386,6 +386,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.main_layout.addWidget(self.inferenceTable)
 
+        self.inferenceRiskLabel = QtWidgets.QLabel("重点牌型：等待牌局状态")
+        self.inferenceRiskLabel.setFont(QtGui.QFont("微软雅黑", 8))
+        self.inferenceRiskLabel.setWordWrap(True)
+        self.inferenceRiskLabel.setToolTip(
+            "显示更适合实战关注的组合概率：对2、三A、炸弹、王炸等。"
+            "这些是隐藏手牌后验概率，不是对手一定会持有或一定会出的结论。"
+        )
+        self.main_layout.addWidget(self.inferenceRiskLabel)
+
     def _side_position_map(self):
         mapping = {
             "landlord": {"left": "landlord_up", "right": "landlord_down"},
@@ -451,6 +460,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_hand_inference_update(self, result):
         if not result or not result.get("players"):
             self.inferenceMetaLabel.setText("样本 - · Pass - · 状态等待")
+            self.inferenceRiskLabel.setText("重点牌型：等待牌局状态")
             for row in (1, 2):
                 for col in range(1, 9):
                     item = QtWidgets.QTableWidgetItem("-")
@@ -554,6 +564,25 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.inferenceTable.setItem(row, col, item)
 
         self._render_remaining_counts()
+
+        risk_parts = []
+        for side_key, side_text in (("left", "左"), ("right", "右")):
+            position = side_map.get(side_key)
+            data = players.get(position) if position else None
+            if not data:
+                continue
+            risks = data.get("combo_risks", {})
+            pair_2 = risks.get("pair_2", 0.0)
+            triple_a = risks.get("triple_A", 0.0)
+            any_bomb = risks.get("any_bomb", data.get("any_bomb", 0.0))
+            rocket = risks.get("rocket", data.get("rocket", 0.0))
+            risk_parts.append(
+                f"{side_text}: 对2 {pair_2:.0%} · 三A {triple_a:.0%} · "
+                f"炸弹 {any_bomb:.0%} · 王炸 {rocket:.0%}"
+            )
+        self.inferenceRiskLabel.setText(
+            "重点牌型  " + ("   |   ".join(risk_parts) if risk_parts else "等待牌局状态")
+        )
 
     @staticmethod
     def _format_inference_probability(player_data, card):
