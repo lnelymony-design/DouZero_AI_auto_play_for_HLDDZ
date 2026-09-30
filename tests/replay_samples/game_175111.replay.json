@@ -1,0 +1,8 @@
+{
+  "format": "wechat_replay_v1",
+  "video": "腾讯欢乐斗地主 2026-09-30 17-51-11.mp4",
+  "sample_seconds": 0.35,
+  "actions": [[28.02,"INIT",1,"D22AKKQQJT9988777654","DQ7",{"left":17,"right":17}],[31.65,"me","7",19],[35.66,"right","9",16,"count"],[38.93,"left","T",16,"count"],[41.84,"me","Q",18],[42.93,"right","PASS","visual"],[47.3,"left","2",15,"count"],[47.66,"me","PASS","visual"],[49.48,"right","PASS","visual"],[52.39,"left","76543",10,"count"],[57.85,"me","PASS","visual"],[60.03,"right","PASS","visual"],[64.04,"left","JJ",8,"count"],[70.22,"me","KK",16],[71.68,"right","PASS","visual"],[72.77,"left","PASS","visual"],[75.68,"me","987654",10],[77.86,"right","PASS","visual"],[78.59,"left","PASS","visual"],[80.41,"me","QJT987",4],[81.86,"right","PASS","visual"],[82.96,"left","PASS","visual"],[85.14,"me","A",3],[85.5,"right","PASS","inferred"],[85.5,"left","PASS","inferred"],[85.5,"me","D",2],[90.23,"right","X",15,"count"],[91.69,"left","PASS","visual"],[96.42,"me","22",0]],
+  "issues": [[85.14,"corrected-self","DA","->","A"]],
+  "summary": {"position_code":1,"bottom_cards":"DQ7","tracked_remaining":{"left":8,"right":15},"my_remaining":0,"confirmed_my_hand":""}
+}
