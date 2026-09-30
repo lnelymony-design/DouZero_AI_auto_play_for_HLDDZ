@@ -218,6 +218,9 @@ class WorkerThread(QThread):
         pending_round_audit = None
         last_init_diag_signature = None
         last_init_diag_time = 0.0
+        scene_blank_frames = 0
+        round_boundary_seen = False
+        midgame_wait_announced = False
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -590,6 +593,56 @@ class WorkerThread(QThread):
                 print(f"推牌审计保存失败: {exc}")
                 pending_round_audit = None
 
+        def reset_round_detection_state(reason):
+            """Clear stale per-round recognition state at a visual boundary."""
+            nonlocal round_signature, expected_side, confirmed_my_hand
+            nonlocal pre_landlord_hand, wechat_other_hands_cards_str
+            nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
+            nonlocal last_init_diag_signature, last_init_diag_time
+            nonlocal self_hand_missing_frames, midgame_wait_announced
+
+            print(f"[ROUND/RESET] {reason}，清理上一局缓存，等待下一局")
+            pending.clear()
+            round_signature = None
+            expected_side = None
+            confirmed_my_hand = None
+            pre_landlord_hand = None
+            wechat_other_hands_cards_str = ""
+            preinit_counts["left"] = None
+            preinit_counts["right"] = None
+            tracked_remaining["left"] = None
+            tracked_remaining["right"] = None
+            observed_remaining["left"] = None
+            observed_remaining["right"] = None
+            count_desync["left"] = False
+            count_desync["right"] = False
+            count_missing_frames["left"] = 0
+            count_missing_frames["right"] = 0
+            self_hand_missing_frames = 0
+            for side in recent_play:
+                recent_play[side] = {"cards": "", "time": 0.0}
+            recent_self_plays.clear()
+            for side in pass_latched:
+                pass_latched[side] = False
+            last_state["three_cards"] = None
+            last_state["position_code"] = None
+            douzero_history.clear()
+            suggestion_audit.clear()
+            douzero_initial_data = None
+            douzero_players = None
+            douzero_paused_reason = None
+            self.env = None
+            self.hand_inference = None
+            self.my_position_code = None
+            self.my_position = ""
+            self.action_list = []
+            self.ai_suggestion_signal.emit([])
+            self.my_position_signal.emit("")
+            self.card_recorder_signal.emit("")
+            last_init_diag_signature = None
+            last_init_diag_time = 0.0
+            midgame_wait_announced = False
+
         def initialize_round(my_hand, three_cards, position_code):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
@@ -770,6 +823,60 @@ class WorkerThread(QThread):
                     side: stable_value(f"live_{side}_count", raw_counts[side], frames=4)
                     for side in ("left", "right")
                 }
+
+                visually_blank = (
+                    not raw_hand
+                    and raw_counts.get("left") is None
+                    and raw_counts.get("right") is None
+                )
+                if visually_blank:
+                    scene_blank_frames += 1
+                else:
+                    scene_blank_frames = 0
+
+                # Fallback end detection: an active round that loses both the
+                # hand and both remaining-count badges for ~4 seconds is almost
+                # certainly on the settlement/transition screen.  Normal short
+                # animations in the supplied recordings lasted only a couple
+                # of frames, so require a much longer blank before ending.
+                if round_initialized and scene_blank_frames >= 12:
+                    print(
+                        "[ROUND/END] 连续检测到结算/过渡空白画面，"
+                        "按牌局结束处理"
+                    )
+                    queue_round_audit("visual_settlement")
+                    self.ai_suggestion_signal.emit([])
+                    round_initialized = False
+                    expected_side = None
+
+                # Whether the previous round was fully initialized or the tool
+                # was started halfway through a game, a sustained blank scene
+                # is the safe boundary at which stale role/bottom/count state
+                # can be discarded.  This is what enables continuous multi-
+                # round operation without restarting the worker.
+                if (
+                    not round_initialized
+                    and scene_blank_frames >= 6
+                    and not round_boundary_seen
+                ):
+                    reset_round_detection_state("检测到牌局结算/过渡画面")
+                    round_boundary_seen = True
+
+                if (
+                    round_boundary_seen
+                    and raw_hand
+                    and len(raw_hand) in (17, 20)
+                    and (
+                        raw_counts.get("left") is not None
+                        or raw_counts.get("right") is not None
+                    )
+                ):
+                    print(
+                        f"[ROUND/START] 检测到新一局牌面候选："
+                        f"我的手牌 {len(raw_hand)} 张，"
+                        f"左={raw_counts.get('left')}，右={raw_counts.get('right')}"
+                    )
+                    round_boundary_seen = False
 
                 if not round_initialized:
                     for side in ("left", "right"):
@@ -962,6 +1069,24 @@ class WorkerThread(QThread):
                             initialize_round(ready_hand, ready_three, ready_position)
 
                 if not round_initialized:
+                    ready_position = last_state["position_code"]
+                    expected_initial = (
+                        20 if ready_position == 1
+                        else 17 if ready_position is not None
+                        else None
+                    )
+                    if (
+                        not midgame_wait_announced
+                        and expected_initial is not None
+                        and init_hand is not None
+                        and 0 < len(init_hand) < expected_initial
+                    ):
+                        print(
+                            f"[ROUND/MIDGAME] 当前稳定手牌 {len(init_hand)} 张，"
+                            f"少于新局初始 {expected_initial} 张；"
+                            "判定为中途接入，本局不伪造历史，等待结算后自动接下一局"
+                        )
+                        midgame_wait_announced = True
                     await asyncio.sleep(0.35)
                     continue
 
