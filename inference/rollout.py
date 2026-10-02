@@ -8,10 +8,12 @@ P0 design rules:
 - Non-terminal values remain heuristics; they are not labelled win rates.
 """
 
+from collections import Counter
 from copy import deepcopy
+import math
 import time
 
-from constants import Bombs, RealCard2EnvCard
+from constants import AllEnvCard, Bombs, RealCard2EnvCard
 from douzero.env.game_new import GameEnv
 
 POSITIONS = ("landlord", "landlord_up", "landlord_down")
@@ -165,6 +167,174 @@ class ExactWorldEnv(GameEnv):
             self.get_acting_player_position()
             self.game_infoset = self.get_infoset()
         return True
+
+
+def validate_rollout_input(
+    public_snapshot,
+    worlds,
+    candidates,
+    my_position,
+):
+    """Validate a detached rollout job before any policy inference."""
+    errors = []
+
+    if my_position not in POSITIONS:
+        errors.append("invalid my_position")
+        return errors
+
+    if public_snapshot.get("my_position") != my_position:
+        errors.append("snapshot my_position mismatch")
+    if public_snapshot.get("acting_player_position") != my_position:
+        errors.append("snapshot is not currently actionable by my_position")
+
+    try:
+        my_hand = [int(card) for card in public_snapshot["my_hand"]]
+    except Exception:
+        errors.append("invalid my_hand")
+        return errors
+
+    played_cards = public_snapshot.get("played_cards") or {}
+    initial_sizes = {
+        "landlord": 20,
+        "landlord_up": 17,
+        "landlord_down": 17,
+    }
+
+    for position in POSITIONS:
+        if position not in played_cards:
+            errors.append(f"missing played_cards for {position}")
+
+    if errors:
+        return errors
+
+    candidate_list = [str(action) for action in candidates]
+    if not candidate_list:
+        errors.append("no candidates")
+    if len(candidate_list) != len(set(candidate_list)):
+        errors.append("duplicate candidates")
+
+    for action in candidate_list:
+        if action in ("", "Pass", "pass", "PASS"):
+            continue
+        unknown = [card for card in action if card not in RealCard2EnvCard]
+        if unknown:
+            errors.append(f"candidate has unknown cards: {unknown}")
+
+    probabilities = []
+    deck_counter = Counter(AllEnvCard)
+    first_exact_hands = None
+
+    for index, world in enumerate(worlds):
+        try:
+            probability = float(world["probability"])
+        except Exception:
+            errors.append(f"world {index} has invalid probability")
+            continue
+
+        if not math.isfinite(probability) or probability <= 0:
+            errors.append(f"world {index} probability is not finite positive")
+            continue
+        probabilities.append(probability)
+
+        hands = world.get("hands") or {}
+        exact_hands = {my_position: list(my_hand)}
+
+        for position in POSITIONS:
+            if position == my_position:
+                continue
+            cards = hands.get(position)
+            if cards is None:
+                errors.append(
+                    f"world {index} missing hand for {position}"
+                )
+                continue
+            try:
+                exact_hands[position] = sorted(
+                    RealCard2EnvCard[card]
+                    for card in cards
+                )
+            except Exception:
+                errors.append(
+                    f"world {index} has invalid cards for {position}"
+                )
+
+        if len(exact_hands) != 3:
+            continue
+
+        current_and_played = []
+        for position in POSITIONS:
+            expected = initial_sizes[position] - len(
+                played_cards[position]
+            )
+            actual = len(exact_hands[position])
+            if actual != expected:
+                errors.append(
+                    f"world {index} {position} count {actual}!={expected}"
+                )
+            current_and_played.extend(exact_hands[position])
+            current_and_played.extend(played_cards[position])
+
+        if Counter(current_and_played) != deck_counter:
+            errors.append(
+                f"world {index} does not reconstruct the 54-card deck"
+            )
+
+        remaining_bottom = list(
+            public_snapshot.get("three_landlord_cards") or []
+        )
+        landlord_counter = Counter(exact_hands["landlord"])
+        bottom_counter = Counter(remaining_bottom)
+        if any(
+            bottom_counter[card] > landlord_counter[card]
+            for card in bottom_counter
+        ):
+            errors.append(
+                f"world {index} violates remaining bottom-card ownership"
+            )
+
+        if first_exact_hands is None:
+            first_exact_hands = exact_hands
+
+    if probabilities:
+        probability_sum = sum(probabilities)
+        if not math.isclose(
+            probability_sum,
+            1.0,
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ):
+            errors.append(
+                f"world probabilities sum to {probability_sum:.9f}, not 1"
+            )
+    else:
+        errors.append("no valid worlds")
+
+    if first_exact_hands is not None and not errors:
+        try:
+            env = ExactWorldEnv.from_public_snapshot(
+                public_snapshot,
+                first_exact_hands,
+            )
+            legal = env.game_infoset.legal_actions
+            for action in candidate_list:
+                candidate_env = (
+                    []
+                    if action in ("", "Pass", "pass", "PASS")
+                    else sorted(
+                        RealCard2EnvCard[card]
+                        for card in action
+                    )
+                )
+                if candidate_env not in legal:
+                    errors.append(
+                        f"illegal candidate for snapshot: {action}"
+                    )
+        except Exception as exc:
+            errors.append(
+                f"snapshot reconstruction failed: {exc!r}"
+            )
+
+    return errors
 
 
 class PosteriorRolloutEvaluator:
@@ -334,6 +504,24 @@ class PosteriorRolloutEvaluator:
 
         worlds = list(worlds or [])[: self.max_worlds]
         candidates = [str(action) for action in (candidates or [])]
+
+        validation_errors = validate_rollout_input(
+            public_snapshot,
+            worlds,
+            candidates,
+            my_position,
+        )
+        if validation_errors:
+            return {
+                "status": "invalid_input",
+                "errors": validation_errors,
+                "worlds_completed": 0,
+                "worlds_requested": len(worlds),
+                "elapsed_seconds": time.monotonic() - started,
+                "candidates": [],
+                "best_action": None,
+            }
+
         if not worlds or not candidates:
             return {
                 "status": "insufficient_input",
