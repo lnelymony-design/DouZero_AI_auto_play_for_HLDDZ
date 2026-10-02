@@ -870,15 +870,21 @@ class HandInferenceEngine:
             "behavior_model": "heuristic_v2_tempered",
         }
 
-    def posterior_worlds(self, max_worlds=24):
+    def posterior_worlds(self, max_worlds=24, allow_infer=True):
         """Return deterministic weighted opponent-hand worlds for rollout.
 
         The returned probabilities sum to one across the selected worlds.
         Selection is stratified over posterior mass rather than taking only the
         highest-weight particles, which keeps lower-probability plausible worlds
         represented in downstream simulation.
+
+        Async rollout must pass allow_infer=False so exporting a job can never
+        trigger a second hidden Monte-Carlo inference on the live recognition
+        path.
         """
         if not self._latest_weighted_samples or self._latest_total_weight <= 0:
+            if not allow_infer:
+                return []
             self.infer()
 
         samples = self._latest_weighted_samples
