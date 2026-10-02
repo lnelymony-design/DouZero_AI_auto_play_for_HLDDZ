@@ -62,7 +62,12 @@ class RolloutResult:
     error: Optional[str] = None
 
 
-def _rollout_process_main(conn, generation_value, stop_event):
+def _rollout_process_main(
+    conn,
+    generation_value,
+    dispatch_value,
+    stop_event,
+):
     """Spawn target. Keep this module Qt-free and own models in the child."""
     try:
         first_message = conn.recv()
@@ -115,8 +120,12 @@ def _rollout_process_main(conn, generation_value, stop_event):
             job = RolloutJob(**raw_job)
             service_epoch = str(message["service_epoch"])
             dispatch_id = str(message["dispatch_id"])
+            dispatch_seq = int(message["dispatch_seq"])
 
-            if int(generation_value.value) != int(job.generation_id):
+            if (
+                int(generation_value.value) != int(job.generation_id)
+                or int(dispatch_value.value) != dispatch_seq
+            ):
                 result = RolloutResult(
                     service_epoch=service_epoch,
                     dispatch_id=dispatch_id,
@@ -129,7 +138,7 @@ def _rollout_process_main(conn, generation_value, stop_event):
                     state_hash=job.state_hash,
                     status="cancelled",
                     payload_json="{}",
-                    error="generation invalidated before dispatch",
+                    error="generation/dispatch invalidated before execution",
                 )
                 conn.send({"type": "result", "result": asdict(result)})
                 continue
@@ -155,6 +164,7 @@ def _rollout_process_main(conn, generation_value, stop_event):
                     stop_event.is_set()
                     or int(generation_value.value)
                     != int(job.generation_id)
+                    or int(dispatch_value.value) != dispatch_seq
                 )
 
             payload = evaluator.evaluate_snapshot(
@@ -221,6 +231,7 @@ class RolloutService:
 
         self._ctx = multiprocessing.get_context("spawn")
         self._generation = self._ctx.Value("q", 0)
+        self._active_dispatch_seq = self._ctx.Value("q", 0)
         self._child_stop = self._ctx.Event()
         self._parent_conn, child_conn = self._ctx.Pipe(duplex=True)
 
@@ -239,7 +250,12 @@ class RolloutService:
 
         self._process = self._ctx.Process(
             target=_rollout_process_main,
-            args=(child_conn, self._generation, self._child_stop),
+            args=(
+                child_conn,
+                self._generation,
+                self._active_dispatch_seq,
+                self._child_stop,
+            ),
             name="PosteriorRolloutProcess",
             daemon=True,
         )
@@ -275,12 +291,14 @@ class RolloutService:
 
             self._generation.value = int(job.generation_id)
             self._dispatch_seq += 1
+            dispatch_seq = self._dispatch_seq
+            self._active_dispatch_seq.value = dispatch_seq
             dispatch_id = (
-                f"{self.service_epoch}:{self._dispatch_seq}"
+                f"{self.service_epoch}:{dispatch_seq}"
             )
 
             if self._pending is not None:
-                old, old_dispatch_id = self._pending
+                old, old_dispatch_id, old_dispatch_seq = self._pending
                 self._superseded_count += 1
                 self._append_result_locked(
                     RolloutResult(
@@ -299,7 +317,7 @@ class RolloutService:
                     )
                 )
 
-            self._pending = (job, dispatch_id)
+            self._pending = (job, dispatch_id, dispatch_seq)
 
         self._wake.set()
         return dispatch_id
@@ -309,9 +327,11 @@ class RolloutService:
             if self._closed:
                 return
             self._generation.value = int(generation_id)
+            self._dispatch_seq += 1
+            self._active_dispatch_seq.value = self._dispatch_seq
 
             if self._pending is not None:
-                old, old_dispatch_id = self._pending
+                old, old_dispatch_id, old_dispatch_seq = self._pending
                 self._pending = None
                 self._append_result_locked(
                     RolloutResult(
@@ -360,6 +380,7 @@ class RolloutService:
                     else self._running.job_id
                 ),
                 "running_dispatch_id": self._running_dispatch_id,
+                "active_dispatch_seq": self._active_dispatch_seq.value,
                 "pending_job_id": (
                     None if self._pending is None
                     else self._pending[0].job_id
@@ -383,7 +404,7 @@ class RolloutService:
             ):
                 return None
 
-            job, dispatch_id = self._pending
+            job, dispatch_id, dispatch_seq = self._pending
             self._pending = None
 
             age = time.monotonic() - job.created_monotonic
@@ -408,7 +429,7 @@ class RolloutService:
 
             self._running = job
             self._running_dispatch_id = dispatch_id
-            return job, dispatch_id
+            return job, dispatch_id, dispatch_seq
 
     def _fail_current_jobs_locked(self, error):
         if self._running is not None:
@@ -433,7 +454,7 @@ class RolloutService:
             self._running_dispatch_id = None
 
         if self._pending is not None:
-            job, dispatch_id = self._pending
+            job, dispatch_id, dispatch_seq = self._pending
             self._append_result_locked(
                 RolloutResult(
                     service_epoch=self.service_epoch,
@@ -513,12 +534,13 @@ class RolloutService:
 
                 dispatch = self._take_pending_for_dispatch()
                 if dispatch is not None:
-                    job, dispatch_id = dispatch
+                    job, dispatch_id, dispatch_seq = dispatch
                     try:
                         self._parent_conn.send({
                             "type": "job",
                             "service_epoch": self.service_epoch,
                             "dispatch_id": dispatch_id,
+                            "dispatch_seq": dispatch_seq,
                             "job": asdict(job),
                         })
                     except Exception as exc:
@@ -627,6 +649,8 @@ class RolloutService:
             self._closed = True
             self._pending = None
             self._generation.value += 1
+            self._dispatch_seq += 1
+            self._active_dispatch_seq.value = self._dispatch_seq
 
         self._child_stop.set()
         self._stop.set()
