@@ -551,66 +551,132 @@ class WechatCardRecognizer:
             return ""
 
         # The three landlord cards overlap and their rank glyphs are only about
-        # 28-30 px apart.  Running the generic whole-band recognizer across all
-        # three cards can mistakenly combine ranks from adjacent cards as the
-        # two glyphs of "10".  Scan three fixed physical card slots instead.
-        slot_regions = (
+        # 28-30 px apart. During the landlord/doubling transition the whole
+        # 3-card group can slide horizontally by roughly one slot. A fixed
+        # layout then sees only the latter two cards (e.g. S1=4, S2=8,
+        # S3=miss). Scan the calibrated layout plus one-slot shifts and choose
+        # the most complete coherent result.
+        base_slots = (
             (0.455, 0.479, 0.068, 0.110),
             (0.477, 0.502, 0.068, 0.110),
             (0.500, 0.527, 0.068, 0.110),
         )
-        faded_regions = (
+        base_faded = (
             (0.455, 0.479, 0.073, 0.110),
             (0.477, 0.502, 0.073, 0.110),
             (0.500, 0.527, 0.073, 0.110),
         )
-
-        normal = []
-        debug = []
-        for slot_index, (region, faded_region) in enumerate(
-            zip(slot_regions, faded_regions), start=1
-        ):
-            found = self._recognize_rank_band(
-                bgr,
-                region=region,
-                min_h_ref=18,
-                max_h_ref=32,
-                min_area_ref=40,
-                score_threshold=0.58,
-            )
-
-            source = "normal"
-            candidate = (
-                max(found, key=lambda item: item[2])
-                if found else None
-            )
-            if candidate is None:
-                candidate = self._recognize_bottom_low_contrast_slot(
-                    bgr, faded_region, score_threshold=0.62
-                )
-                source = "faded" if candidate is not None else "miss"
-
-            if candidate is not None:
-                normal.append(candidate)
-                debug.append({
-                    "slot": slot_index,
-                    "rank": candidate[1],
-                    "score": round(float(candidate[2]), 3),
-                    "source": source,
-                })
-            else:
-                debug.append({
-                    "slot": slot_index,
-                    "rank": None,
-                    "score": None,
-                    "source": "miss",
-                })
+        layouts = (
+            ("center", 0.000),
+            ("left_half", -0.011),
+            ("left_full", -0.022),
+            ("right_half", 0.011),
+            ("right_full", 0.022),
+        )
 
         jokers = self._detect_jokers(
-            bgr, region=(0.45, 0.55, 0.05, 0.18)
+            bgr, region=(0.42, 0.58, 0.05, 0.18)
         )
-        self.last_bottom_debug = debug
-        return self._merge_cards(normal, jokers)
+
+        layout_results = []
+        for layout_name, dx in layouts:
+            normal = []
+            debug = []
+
+            def shifted(region):
+                return (
+                    max(0.0, region[0] + dx),
+                    min(1.0, region[1] + dx),
+                    region[2],
+                    region[3],
+                )
+
+            for slot_index, (region, faded_region) in enumerate(
+                zip(base_slots, base_faded), start=1
+            ):
+                region = shifted(region)
+                faded_region = shifted(faded_region)
+                found = self._recognize_rank_band(
+                    bgr,
+                    region=region,
+                    min_h_ref=18,
+                    max_h_ref=32,
+                    min_area_ref=40,
+                    score_threshold=0.58,
+                )
+
+                source = "normal"
+                candidate = (
+                    max(found, key=lambda item: item[2])
+                    if found else None
+                )
+                if candidate is None:
+                    candidate = self._recognize_bottom_low_contrast_slot(
+                        bgr, faded_region, score_threshold=0.62
+                    )
+                    source = (
+                        "faded" if candidate is not None else "miss"
+                    )
+
+                if candidate is not None:
+                    normal.append(candidate)
+                    debug.append({
+                        "slot": slot_index,
+                        "rank": candidate[1],
+                        "score": round(float(candidate[2]), 3),
+                        "source": source,
+                        "layout": layout_name,
+                    })
+                else:
+                    debug.append({
+                        "slot": slot_index,
+                        "rank": None,
+                        "score": None,
+                        "source": "miss",
+                        "layout": layout_name,
+                    })
+
+            cards = self._merge_cards(normal, jokers)
+            scores = [
+                float(item["score"])
+                for item in debug
+                if item["score"] is not None
+            ]
+            min_score = min(scores) if scores else 0.0
+            avg_score = (
+                sum(scores) / len(scores) if scores else 0.0
+            )
+            # Completeness dominates. Confidence breaks ties, then prefer the
+            # smallest geometric shift to avoid overfitting UI noise.
+            layout_results.append({
+                "name": layout_name,
+                "dx": dx,
+                "cards": cards,
+                "debug": debug,
+                "rank_count": len(cards),
+                "min_score": min_score,
+                "avg_score": avg_score,
+            })
+
+        best = max(
+            layout_results,
+            key=lambda item: (
+                min(3, item["rank_count"]),
+                item["min_score"],
+                item["avg_score"],
+                -abs(item["dx"]),
+            ),
+        )
+        self.last_bottom_debug = best["debug"]
+        self.last_bottom_layout = {
+            "name": best["name"],
+            "dx": best["dx"],
+            "cards": best["cards"],
+            "rank_count": best["rank_count"],
+            "min_score": round(best["min_score"], 3),
+            "avg_score": round(best["avg_score"], 3),
+        }
+        return best["cards"]
 
     def recognize_left_played(self, image, expected_count=None):
         # Use a narrow strip by default so the previous centre-table play is
