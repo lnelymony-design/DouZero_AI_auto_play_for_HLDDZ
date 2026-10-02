@@ -1311,14 +1311,9 @@ class WorkerThread(QThread):
                 }
                 suggestion_audit.append(suggestion_record)
 
-                # HUD is already updated above. Rollout is only queued now,
-                # so recognition never waits for posterior simulation.
-                schedule_rollout(
-                    suggestion_record,
-                    final_action,
-                    raw_actions,
-                    ess_ratio,
-                )
+                # Persist the user-visible recommendation before submitting the
+                # shadow experiment. This preserves causal audit ordering:
+                # suggestion -> rollout_submitted -> rollout_result.
                 persist_live_audit(
                     "suggestion",
                     {
@@ -1328,6 +1323,16 @@ class WorkerThread(QThread):
                             "rollout_status"
                         ),
                     },
+                )
+
+                # HUD is already updated above. Rollout is queued only after
+                # the recommendation is observable, so recognition never waits
+                # for posterior simulation.
+                schedule_rollout(
+                    suggestion_record,
+                    final_action,
+                    raw_actions,
+                    ess_ratio,
                 )
             except Exception as exc:
                 pause_douzero(f"建议计算失败：{exc}")
