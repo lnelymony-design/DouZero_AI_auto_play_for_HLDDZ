@@ -42,6 +42,10 @@ class Config:
     rollout_time_budget_seconds: float
     rollout_min_ess_ratio: float
     rollout_min_value_gain: float
+    rollout_device: str
+    rollout_cpu_threads: int
+    rollout_max_job_age_seconds: float
+    rollout_shutdown_timeout_seconds: float
     
     def __init__(self, **kwargs) -> None:
         self.window_width = kwargs.get('window_width', 1600)
@@ -84,6 +88,10 @@ class Config:
         self.rollout_time_budget_seconds = kwargs.get('rollout_time_budget_seconds', 8.0)
         self.rollout_min_ess_ratio = kwargs.get('rollout_min_ess_ratio', 0.35)
         self.rollout_min_value_gain = kwargs.get('rollout_min_value_gain', 0.15)
+        self.rollout_device = kwargs.get('rollout_device', 'cpu')
+        self.rollout_cpu_threads = kwargs.get('rollout_cpu_threads', 1)
+        self.rollout_max_job_age_seconds = kwargs.get('rollout_max_job_age_seconds', 12.0)
+        self.rollout_shutdown_timeout_seconds = kwargs.get('rollout_shutdown_timeout_seconds', 1.5)
     
     @classmethod
     def load(cls):
