@@ -229,6 +229,7 @@ class RolloutService:
         self._stop = threading.Event()
         self._ready = False
         self._closed = False
+        self._failed = False
         self._running = None
         self._running_dispatch_id = None
         self._pending = None
@@ -252,6 +253,13 @@ class RolloutService:
         )
         self._bridge.start()
 
+        self._watchdog = threading.Thread(
+            target=self._watchdog_loop,
+            name="PosteriorRolloutWatchdog",
+            daemon=True,
+        )
+        self._watchdog.start()
+
     def _append_result_locked(self, result):
         self._results.append(result)
         while len(self._results) > 32:
@@ -262,7 +270,7 @@ class RolloutService:
             raise TypeError("job must be RolloutJob")
 
         with self._lock:
-            if self._closed:
+            if self._closed or self._failed:
                 return None
 
             self._generation.value = int(job.generation_id)
@@ -334,7 +342,11 @@ class RolloutService:
 
     def is_ready(self):
         with self._lock:
-            return bool(self._ready and not self._closed)
+            return bool(
+                self._ready
+                and not self._closed
+                and not self._failed
+            )
 
     def status(self):
         with self._lock:
@@ -342,6 +354,7 @@ class RolloutService:
                 "service_epoch": self.service_epoch,
                 "ready": self._ready,
                 "closed": self._closed,
+                "failed": self._failed,
                 "running_job_id": (
                     None if self._running is None
                     else self._running.job_id
@@ -481,6 +494,75 @@ class RolloutService:
                 self._fatal_error = traceback.format_exc()
                 self._ready = False
 
+    def _watchdog_loop(self):
+        """Hard-stop only the isolated child if cooperative cancel wedges."""
+        while not self._stop.wait(0.10):
+            with self._lock:
+                job = self._running
+                dispatch_id = self._running_dispatch_id
+                failed = self._failed
+                closed = self._closed
+
+            if closed or failed or job is None:
+                continue
+
+            age = time.monotonic() - job.created_monotonic
+            hard_limit = max(
+                job.max_job_age_seconds,
+                job.time_budget_seconds,
+            ) + 1.0
+            if age <= hard_limit:
+                continue
+
+            error = (
+                "rollout watchdog terminated child after "
+                f"{age:.2f}s (limit {hard_limit:.2f}s)"
+            )
+
+            # This thread is intentionally independent from Pipe send/recv.
+            try:
+                self._child_stop.set()
+                if self._process.is_alive():
+                    self._process.terminate()
+                    self._process.join(timeout=0.5)
+            except Exception as exc:
+                error += f"; terminate_error={exc!r}"
+
+            with self._lock:
+                if (
+                    self._running is not None
+                    and self._running.job_id == job.job_id
+                    and self._running_dispatch_id == dispatch_id
+                ):
+                    self._append_result_locked(
+                        RolloutResult(
+                            service_epoch=self.service_epoch,
+                            dispatch_id=dispatch_id or "",
+                            session_id=job.session_id,
+                            round_id=job.round_id,
+                            generation_id=job.generation_id,
+                            posterior_revision=job.posterior_revision,
+                            job_id=job.job_id,
+                            suggestion_id=job.suggestion_id,
+                            state_hash=job.state_hash,
+                            status="watchdog_terminated",
+                            payload_json="{}",
+                            error=error,
+                        )
+                    )
+                    self._running = None
+                    self._running_dispatch_id = None
+
+                self._pending = None
+                self._fatal_error = error
+                self._ready = False
+                self._failed = True
+
+            # Do not reuse a potentially corrupted IPC channel after terminate.
+            self._stop.set()
+            self._wake.set()
+            break
+
     def stop(self, timeout=None):
         timeout = (
             self.shutdown_timeout
@@ -505,6 +587,11 @@ class RolloutService:
             pass
 
         self._bridge.join(timeout=min(timeout, 0.5))
+        if (
+            hasattr(self, "_watchdog")
+            and self._watchdog is not threading.current_thread()
+        ):
+            self._watchdog.join(timeout=min(timeout, 0.25))
         self._process.join(timeout=max(0.0, timeout - 0.5))
 
         if self._process.is_alive():
