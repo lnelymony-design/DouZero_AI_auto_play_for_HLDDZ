@@ -4,6 +4,18 @@ from inference.engine import HandInferenceEngine
 
 
 class HandInferenceEngineTests(unittest.TestCase):
+    def test_inference_can_be_cancelled_before_sampling(self):
+        engine = HandInferenceEngine(
+            my_position="landlord",
+            my_hand_cards="333444555666777888DX",
+            sample_count=400,
+            random_seed=17,
+        )
+        result = engine.infer(should_cancel=lambda: True)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(result["players"], {})
+        self.assertEqual(result["samples"], 0)
+
     def test_revealed_bottom_card_is_forced_to_landlord(self):
         # Farmer perspective: D is a revealed bottom card, so before landlord
         # plays it the landlord must still own the big joker.
