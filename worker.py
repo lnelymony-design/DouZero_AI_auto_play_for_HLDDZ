@@ -257,6 +257,7 @@ class WorkerThread(QThread):
         round_boundary_seen = False
         midgame_wait_announced = False
         last_successful_screenshot_monotonic = 0.0
+        last_audit_error_reported = None
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -388,15 +389,32 @@ class WorkerThread(QThread):
                     if self.rollout_service is None
                     else self.rollout_service.status()
                 ),
+                "audit_writer": self.audit_writer.status(
+                    self.current_round_id
+                ),
             }
             if extra:
                 payload["event_detail"] = dict(extra)
             return payload
 
         def persist_live_audit(event_type, extra=None):
-            nonlocal audit_event_seq
+            nonlocal audit_event_seq, last_audit_error_reported
             if not self.current_round_id:
                 return False
+
+            writer_status = self.audit_writer.status(
+                self.current_round_id
+            )
+            writer_error = writer_status.get("last_error")
+            if (
+                writer_error
+                and writer_error != last_audit_error_reported
+            ):
+                print(f"实时审计写入异常 >>> {writer_error}")
+                last_audit_error_reported = writer_error
+            elif not writer_error:
+                last_audit_error_reported = None
+
             audit_event_seq += 1
             payload = build_live_audit_payload(event_type, extra)
             payload["event_seq"] = audit_event_seq
