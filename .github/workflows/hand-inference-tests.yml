@@ -21,4 +21,4 @@ jobs:
       - name: Compile changed Python entry points
         run: python -m py_compile main.py config.py runtime_audit.py inference/engine.py inference/rollout.py inference/rollout_service.py douzero/evaluation/deep_agent_new.py helpers/ScreenHelper.py helpers/ImageLocator.py helpers/WechatCardRecognizer.py tools/wechat_video_replay.py tools/evaluate_replay_truth.py tools/evaluate_inference_audits.py douzero/env/game_new.py worker.py main_window.py
       - name: Run unit tests
-        run: python -m unittest tests/test_hand_inference.py tests/test_risk_adjustment.py tests/test_game_env_observed_pass.py tests/test_decision_policy.py tests/test_posterior_control.py tests/test_rollout.py tests/test_runtime_audit.py
+        run: python -m unittest tests/test_hand_inference.py tests/test_risk_adjustment.py tests/test_game_env_observed_pass.py tests/test_decision_policy.py tests/test_posterior_control.py tests/test_rollout.py tests/test_runtime_audit.py tests/test_rollout_service_contract.py
