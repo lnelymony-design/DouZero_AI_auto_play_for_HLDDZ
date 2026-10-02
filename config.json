@@ -79,5 +79,6 @@
     "rollout_device": "cpu",
     "rollout_cpu_threads": 1,
     "rollout_max_job_age_seconds": 12,
-    "rollout_shutdown_timeout_seconds": 1.5
+    "rollout_shutdown_timeout_seconds": 1.5,
+    "rollout_result_max_screen_age_seconds": 2
 }
