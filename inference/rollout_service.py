@@ -410,6 +410,48 @@ class RolloutService:
             self._running_dispatch_id = dispatch_id
             return job, dispatch_id
 
+    def _fail_current_jobs_locked(self, error):
+        if self._running is not None:
+            job = self._running
+            self._append_result_locked(
+                RolloutResult(
+                    service_epoch=self.service_epoch,
+                    dispatch_id=self._running_dispatch_id or "",
+                    session_id=job.session_id,
+                    round_id=job.round_id,
+                    generation_id=job.generation_id,
+                    posterior_revision=job.posterior_revision,
+                    job_id=job.job_id,
+                    suggestion_id=job.suggestion_id,
+                    state_hash=job.state_hash,
+                    status="service_failed",
+                    payload_json="{}",
+                    error=str(error),
+                )
+            )
+            self._running = None
+            self._running_dispatch_id = None
+
+        if self._pending is not None:
+            job, dispatch_id = self._pending
+            self._append_result_locked(
+                RolloutResult(
+                    service_epoch=self.service_epoch,
+                    dispatch_id=dispatch_id,
+                    session_id=job.session_id,
+                    round_id=job.round_id,
+                    generation_id=job.generation_id,
+                    posterior_revision=job.posterior_revision,
+                    job_id=job.job_id,
+                    suggestion_id=job.suggestion_id,
+                    state_hash=job.state_hash,
+                    status="service_failed",
+                    payload_json="{}",
+                    error=str(error),
+                )
+            )
+            self._pending = None
+
     def _handle_message(self, message):
         message_type = message.get("type")
         if message_type == "ready":
@@ -419,9 +461,12 @@ class RolloutService:
             return
 
         if message_type == "fatal":
+            error = message.get("error") or "rollout child fatal error"
             with self._lock:
-                self._fatal_error = message.get("error")
+                self._fail_current_jobs_locked(error)
+                self._fatal_error = error
                 self._ready = False
+                self._failed = True
             return
 
         if message_type != "result":
@@ -452,12 +497,15 @@ class RolloutService:
 
             while not self._stop.is_set():
                 if not self._process.is_alive():
+                    error = (
+                        self._fatal_error
+                        or "rollout child exited unexpectedly"
+                    )
                     with self._lock:
-                        if self._fatal_error is None:
-                            self._fatal_error = (
-                                "rollout child exited unexpectedly"
-                            )
+                        self._fail_current_jobs_locked(error)
+                        self._fatal_error = error
                         self._ready = False
+                        self._failed = True
                     break
 
                 while self._parent_conn.poll(0.0):
@@ -490,9 +538,12 @@ class RolloutService:
         except EOFError:
             pass
         except Exception:
+            error = traceback.format_exc()
             with self._lock:
-                self._fatal_error = traceback.format_exc()
+                self._fail_current_jobs_locked(error)
+                self._fatal_error = error
                 self._ready = False
+                self._failed = True
 
     def _watchdog_loop(self):
         """Hard-stop only the isolated child if cooperative cancel wedges."""
