@@ -52,7 +52,13 @@ class LiveAuditWriter:
     def _atomic_write_json(self, path, payload):
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fp:
-            json.dump(payload, fp, ensure_ascii=False, indent=2)
+            json.dump(
+                payload,
+                fp,
+                ensure_ascii=False,
+                indent=2,
+                allow_nan=False,
+            )
             fp.flush()
             os.fsync(fp.fileno())
         os.replace(tmp, path)
