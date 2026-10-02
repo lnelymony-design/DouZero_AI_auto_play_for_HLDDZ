@@ -230,6 +230,7 @@ class WorkerThread(QThread):
         tracked_remaining = {"left": None, "right": None}
         observed_remaining = {"left": None, "right": None}
         count_desync = {"left": False, "right": False}
+        last_desync_report = {"left": None, "right": None}
         recent_play = {
             "left": {"cards": "", "time": 0.0},
             "right": {"cards": "", "time": 0.0},
@@ -471,7 +472,7 @@ class WorkerThread(QThread):
             old = bool(count_desync.get(side))
             count_desync[side] = value
             if old == value:
-                return
+                return False
             bump_generation(
                 f"desync_{'enter' if value else 'exit'}:{side}:{reason}"
             )
@@ -483,6 +484,9 @@ class WorkerThread(QThread):
                     "value": value,
                 },
             )
+            if not value:
+                last_desync_report[side] = None
+            return True
 
         def drain_rollout_results():
             if self.rollout_service is None:
@@ -1372,12 +1376,62 @@ class WorkerThread(QThread):
                 pending_round_audit["screenshots"].append(image_name)
                 capture_times.pop(0)
 
+                pending_round_audit["event_seq"] += 1
+                pending_round_audit["payload"].setdefault(
+                    "events", []
+                ).append({
+                    "event_seq": pending_round_audit["event_seq"],
+                    "event_type": "settlement_screenshot_saved",
+                    "timestamp_utc": datetime.now(
+                        timezone.utc
+                    ).isoformat(timespec="milliseconds"),
+                    "generation_id": pending_round_audit[
+                        "payload"
+                    ].get("generation_id"),
+                    "posterior_revision": pending_round_audit[
+                        "payload"
+                    ].get("posterior_revision"),
+                    "detail": {
+                        "image": image_name,
+                        "index": len(
+                            pending_round_audit["screenshots"]
+                        ),
+                    },
+                })
+
                 if capture_times:
                     return
+
+                pending_round_audit["event_seq"] += 1
+                pending_round_audit["payload"].setdefault(
+                    "events", []
+                ).append({
+                    "event_seq": pending_round_audit["event_seq"],
+                    "event_type": "round_finalized",
+                    "timestamp_utc": datetime.now(
+                        timezone.utc
+                    ).isoformat(timespec="milliseconds"),
+                    "generation_id": pending_round_audit[
+                        "payload"
+                    ].get("generation_id"),
+                    "posterior_revision": pending_round_audit[
+                        "payload"
+                    ].get("posterior_revision"),
+                    "detail": {
+                        "screenshots": len(
+                            pending_round_audit["screenshots"]
+                        )
+                    },
+                })
 
                 json_name = f"{stamp}.json"
                 payload = dict(pending_round_audit["payload"])
                 payload["format"] = "wechat_posterior_control_audit_v5"
+                payload["schema_version"] = 5
+                payload["status"] = "completed"
+                payload["updated_at_utc"] = datetime.now(
+                    timezone.utc
+                ).isoformat(timespec="milliseconds")
                 payload["screenshots"] = list(
                     pending_round_audit["screenshots"]
                 )
@@ -1438,6 +1492,8 @@ class WorkerThread(QThread):
             observed_remaining["right"] = None
             count_desync["left"] = False
             count_desync["right"] = False
+            last_desync_report["left"] = None
+            last_desync_report["right"] = None
             count_missing_frames["left"] = 0
             count_missing_frames["right"] = 0
             self_hand_missing_frames = 0
@@ -2257,6 +2313,7 @@ class WorkerThread(QThread):
                                 "cards": cards,
                                 "side": actor,
                                 "remaining": new_count,
+                                "evidence": evidence,
                             },
                         )
                         expected_side = side_cycle[actor]
@@ -2292,17 +2349,37 @@ class WorkerThread(QThread):
                                 emit_remaining_counts()
                         elif count < tracked:
                             candidate = opponent_candidate(side)
-                            set_desync(
+                            desync_changed = set_desync(
                                 side,
                                 candidate is None,
                                 "count_drop_without_matched_play",
                             )
                             if count_desync[side]:
                                 observed_remaining[side] = count
-                                print(
-                                    f"剩余张数校验 >>> {label}画面 {count}，"
-                                    f"历史 {tracked}；等待匹配 {tracked - count} 张出牌"
-                                )
+                                report_key = (count, tracked)
+                                if (
+                                    desync_changed
+                                    or last_desync_report[side]
+                                    != report_key
+                                ):
+                                    print(
+                                        f"剩余张数校验 >>> {label}画面 {count}，"
+                                        f"历史 {tracked}；等待匹配 {tracked - count} 张出牌"
+                                    )
+                                    if (
+                                        not desync_changed
+                                        and last_desync_report[side]
+                                        is not None
+                                    ):
+                                        persist_live_audit(
+                                            "desync_updated",
+                                            {
+                                                "side": side,
+                                                "observed": count,
+                                                "tracked": tracked,
+                                            },
+                                        )
+                                    last_desync_report[side] = report_key
                                 emit_remaining_counts()
 
                 # Explicit Pass remains useful, but it is no longer a single
