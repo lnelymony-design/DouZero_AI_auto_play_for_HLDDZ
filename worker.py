@@ -255,6 +255,7 @@ class WorkerThread(QThread):
         scene_blank_frames = 0
         round_boundary_seen = False
         midgame_wait_announced = False
+        last_successful_screenshot_monotonic = 0.0
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -449,8 +450,42 @@ class WorkerThread(QThread):
                     else record.get("rollout_state_hash")
                 )
                 stale_reason = None
+                now_monotonic = time.monotonic()
+                service_epoch = self.rollout_service.service_epoch
+                created_monotonic = (
+                    None if record is None
+                    else record.get("rollout_created_monotonic")
+                )
+                expected_dispatch_id = (
+                    None if record is None
+                    else record.get("rollout_dispatch_id")
+                )
+                expected_service_epoch = (
+                    None if record is None
+                    else record.get("rollout_service_epoch")
+                )
+
                 if not self.rollout_accepting_results:
                     stale_reason = "not_accepting_results"
+                elif result.service_epoch != service_epoch:
+                    stale_reason = "service_epoch_mismatch"
+                elif expected_service_epoch != result.service_epoch:
+                    stale_reason = "suggestion_service_epoch_mismatch"
+                elif expected_dispatch_id != result.dispatch_id:
+                    stale_reason = "dispatch_id_mismatch"
+                elif (
+                    created_monotonic is not None
+                    and now_monotonic - float(created_monotonic)
+                    > self.config.rollout_max_job_age_seconds
+                ):
+                    stale_reason = "result_ttl_expired"
+                elif (
+                    last_successful_screenshot_monotonic <= 0
+                    or now_monotonic
+                    - last_successful_screenshot_monotonic
+                    > self.config.rollout_result_max_screen_age_seconds
+                ):
+                    stale_reason = "screen_stale"
                 elif result.session_id != self.session_id:
                     stale_reason = "session_mismatch"
                 elif result.round_id != self.current_round_id:
@@ -602,7 +637,13 @@ class WorkerThread(QThread):
             job_id = uuid.uuid4().hex
             suggestion_record["rollout_state_hash"] = state_hash
             suggestion_record["rollout_job_id"] = job_id
-            suggestion_record["rollout_status"] = "submitted"
+            suggestion_record["rollout_created_monotonic"] = (
+                time.monotonic()
+            )
+            suggestion_record["rollout_service_epoch"] = (
+                self.rollout_service.service_epoch
+            )
+            suggestion_record["rollout_status"] = "submitting"
 
             job = RolloutJob(
                 session_id=self.session_id,
@@ -643,10 +684,14 @@ class WorkerThread(QThread):
                 device=self.config.rollout_device,
                 cpu_threads=self.config.rollout_cpu_threads,
             )
-            submitted = self.rollout_service.submit(job)
-            if not submitted:
+            dispatch_id = self.rollout_service.submit(job)
+            if dispatch_id is None:
                 suggestion_record["rollout_status"] = "submit_failed"
-            return submitted
+                return False
+
+            suggestion_record["rollout_dispatch_id"] = dispatch_id
+            suggestion_record["rollout_status"] = "submitted"
+            return True
 
         self._live_audit_hook = persist_live_audit
 
@@ -1480,6 +1525,7 @@ class WorkerThread(QThread):
                 continue
 
             missing_reported = False
+            last_successful_screenshot_monotonic = time.monotonic()
             flush_round_audit_if_due(screenshot)
             if not screenshot_saved:
                 os.makedirs('screenshots', exist_ok=True)
