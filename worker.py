@@ -1158,61 +1158,33 @@ class WorkerThread(QThread):
 
         def queue_round_audit(reason):
             nonlocal pending_round_audit
-            if self.hand_inference is None:
+            if self.hand_inference is None or not self.current_round_id:
                 return
 
-            history = [
-                {
-                    "player": player,
-                    "action": cards if cards else "Pass",
-                }
-                for player, cards in self.hand_inference.history
-            ]
+            persist_live_audit(
+                "round_end",
+                {"reason": str(reason)},
+            )
             now = time.monotonic()
+            payload = build_live_audit_payload(
+                "round_end",
+                {"reason": str(reason)},
+            )
+            payload["event_seq"] = audit_event_seq
+            payload["reason"] = reason
+            payload["ended_at"] = datetime.now().isoformat(
+                timespec="seconds"
+            )
+
             pending_round_audit = {
-                # Settlement timing varies across the three recordings. Capture
-                # a short burst so the evaluator can choose the frame in which
-                # both revealed hands are actually visible.
+                # Settlement screenshots are supplemental. The live JSON was
+                # already persisted during play and survives if capture fails.
                 "capture_times": [now + 0.8, now + 1.6, now + 2.4],
                 "screenshots": [],
                 "audit_stamp": datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
-                "reason": reason,
-                "ended_at": datetime.now().isoformat(timespec="seconds"),
-                "my_position": self.my_position,
-                "initial_my_hand": "".join(self.hand_inference.initial_my_hand),
-                "three_landlord_cards": "".join(
-                    self.hand_inference.three_landlord_cards
-                ),
-                "public_history": history,
-                "tracked_remaining": dict(tracked_remaining),
-                "observed_remaining": dict(observed_remaining),
-                "count_desync": dict(count_desync),
-                "inference": self.last_hand_inference_result,
-                "douzero_history": [
-                    {
-                        "player": player,
-                        "action": cards if cards else "Pass",
-                    }
-                    for player, cards in douzero_history
-                ],
-                "suggestion_audit": list(suggestion_audit),
-                "posterior_control": {
-                    "residual_behavior_strength": (
-                        self.config.inference_residual_behavior_strength
-                    ),
-                    "residual_behavior_temperature": (
-                        self.config.inference_residual_behavior_temperature
-                    ),
-                    "rollout_enabled": bool(self.config.rollout_enabled),
-                    "rollout_shadow_mode": bool(
-                        self.config.rollout_shadow_mode
-                    ),
-                    "rollout_max_worlds": self.config.rollout_max_worlds,
-                    "rollout_min_worlds": self.config.rollout_min_worlds,
-                    "rollout_time_budget_seconds": (
-                        self.config.rollout_time_budget_seconds
-                    ),
-                },
+                "round_id": self.current_round_id,
+                "event_seq": audit_event_seq,
+                "payload": payload,
             }
 
         def flush_round_audit_if_due(screenshot):
@@ -1239,19 +1211,30 @@ class WorkerThread(QThread):
                     return
 
                 json_name = f"{stamp}.json"
-                json_path = os.path.join(root, json_name)
-                payload = dict(pending_round_audit)
-                payload.pop("capture_times", None)
-                payload.pop("audit_stamp", None)
-                payload["format"] = "wechat_posterior_control_audit_v4"
-
-                with open(json_path, "w", encoding="utf-8") as fp:
-                    json.dump(payload, fp, ensure_ascii=False, indent=2)
-
-                print(
-                    f"推牌审计已保存 >>> {json_path} "
-                    f"(结算截图 {len(payload['screenshots'])} 张)"
+                payload = dict(pending_round_audit["payload"])
+                payload["format"] = "wechat_posterior_control_audit_v5"
+                payload["screenshots"] = list(
+                    pending_round_audit["screenshots"]
                 )
+                payload["event_seq"] = pending_round_audit["event_seq"]
+
+                submitted = self.audit_writer.finalize(
+                    pending_round_audit["round_id"],
+                    pending_round_audit["event_seq"],
+                    payload,
+                    json_name,
+                )
+                if submitted:
+                    print(
+                        "推牌审计final已提交 >>> "
+                        f"{os.path.join(root, json_name)} "
+                        f"(结算截图 {len(payload['screenshots'])} 张)"
+                    )
+                else:
+                    print(
+                        "推牌审计final未重复提交 >>> "
+                        f"{pending_round_audit['round_id']}"
+                    )
                 pending_round_audit = None
             except Exception as exc:
                 print(f"推牌审计保存失败: {exc}")
@@ -1266,6 +1249,12 @@ class WorkerThread(QThread):
             nonlocal self_hand_missing_frames, midgame_wait_announced
 
             print(f"[ROUND/RESET] {reason}，清理上一局缓存，等待下一局")
+            if self.current_round_id:
+                persist_live_audit(
+                    "round_reset",
+                    {"reason": str(reason)},
+                )
+            bump_generation(f"round_reset:{reason}")
             pending.clear()
             round_signature = None
             expected_side = None
