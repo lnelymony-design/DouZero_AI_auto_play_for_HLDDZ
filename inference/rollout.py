@@ -255,6 +255,16 @@ class PosteriorRolloutEvaluator:
                 return {"status": stopped}
 
             action = self._choose_policy_action(env)
+
+            # A single model call may consume the remaining budget. Do not
+            # mutate the simulated world with a result that arrived stale.
+            stopped = self._should_stop(
+                should_cancel,
+                deadline_monotonic,
+            )
+            if stopped:
+                return {"status": stopped}
+
             position = env.acting_player_position
             if action:
                 trick_last_player = position
@@ -427,27 +437,28 @@ class PosteriorRolloutEvaluator:
                 "samples": bucket["samples"],
             })
 
+        # Python sort is stable, so equal rollout values preserve the
+        # original DouZero candidate order. Auxiliary control/step metrics are
+        # diagnostics only and do not decide the best action.
         results.sort(
-            key=lambda item: (
-                item["rollout_value"],
-                item["control_share"],
-                -item["expected_steps"],
-            ),
+            key=lambda item: item["rollout_value"],
             reverse=True,
         )
 
         if stop_reason == "cancelled":
             status = "cancelled"
-        elif complete_worlds >= self.min_worlds:
-            status = "ok" if stop_reason is None else "partial"
-        elif complete_worlds > 0:
-            status = "partial"
+        elif complete_worlds < self.min_worlds:
+            status = "insufficient_worlds"
+        elif stop_reason is None:
+            status = "ok"
         else:
-            status = (
-                "deadline"
-                if stop_reason == "deadline"
-                else "insufficient_worlds"
-            )
+            status = "partial"
+
+        best_action = (
+            results[0]["action"]
+            if results and status in ("ok", "partial")
+            else None
+        )
 
         return {
             "status": status,
@@ -456,7 +467,7 @@ class PosteriorRolloutEvaluator:
             "worlds_requested": min(len(worlds), self.max_worlds),
             "elapsed_seconds": time.monotonic() - started,
             "candidates": results,
-            "best_action": results[0]["action"] if results else None,
+            "best_action": best_action,
         }
 
     def evaluate(self, public_env, hand_inference, candidates, my_position):
