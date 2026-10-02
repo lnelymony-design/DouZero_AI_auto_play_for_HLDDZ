@@ -617,7 +617,7 @@ class HandInferenceEngine:
                 high = mid
         return low
 
-    def infer(self):
+    def infer(self, should_cancel=None):
         # Rewind the Monte-Carlo stream for every public state.  The same state
         # is therefore deterministic, while new observations change the legal
         # pool/weights rather than introducing unrelated sampling noise.
@@ -632,7 +632,22 @@ class HandInferenceEngine:
         sampled_hands = []
         log_weights = []
         residual_log_weights = []
-        for _ in range(self.sample_count):
+        for sample_index in range(self.sample_count):
+            if (
+                should_cancel is not None
+                and sample_index % 16 == 0
+                and should_cancel()
+            ):
+                self._latest_weighted_samples = []
+                self._latest_total_weight = 0.0
+                return {
+                    "players": {},
+                    "samples": len(sampled_hands),
+                    "effective_samples": 0.0,
+                    "cancelled": True,
+                    "warning": "Inference cancelled by newer public state.",
+                }
+
             hands = self._sample_current_hands(hidden_pool, remaining_counts, forced_landlord)
             if hands is None:
                 continue
