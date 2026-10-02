@@ -673,16 +673,30 @@ class WorkerThread(QThread):
             label = {"left": "左侧玩家", "right": "右侧玩家", "me": "我"}[side]
             suffix = " [由后续行动反推]" if inferred else ""
             print(f"微信牌局 >>> {label}：不出{suffix}")
+            bump_generation(f"public_pass:{player}")
             self.played_card_signal.emit([player, "Pass"])
             self.record_hand_inference_action(player, "")
             apply_action_to_douzero(player, "")
             expected_side = side_cycle[side]
+            persist_live_audit(
+                "pass",
+                {
+                    "player": player,
+                    "side": side,
+                    "inferred": bool(inferred),
+                },
+            )
             return True
 
         def pause_douzero(reason):
             nonlocal douzero_paused_reason
             if douzero_paused_reason != reason:
                 print(f"DouZero建议暂停 >>> {reason}")
+                bump_generation(f"douzero_pause:{reason}")
+                persist_live_audit(
+                    "pause",
+                    {"reason": str(reason)},
+                )
             douzero_paused_reason = reason
             self.ai_suggestion_signal.emit([("__PAUSED__", "-", "-")])
 
@@ -1298,6 +1312,17 @@ class WorkerThread(QThread):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
+            nonlocal audit_event_seq, suggestion_seq
+
+            self.current_round_id = (
+                datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                + "_"
+                + uuid.uuid4().hex[:6]
+            )
+            audit_event_seq = 0
+            suggestion_seq = 0
+            self.rollout_accepting_results = True
+            bump_generation("round_init")
 
             self.my_hand_cards = my_hand
             self.three_cards = three_cards
@@ -1399,6 +1424,13 @@ class WorkerThread(QThread):
             print(f"首个行动方: {expected_side}")
             print("==============================")
             print()
+            persist_live_audit(
+                "init",
+                {
+                    "initial_hand_count": len(my_hand),
+                    "position_code": position_code,
+                },
+            )
             self.refresh_hand_inference()
             emit_douzero_suggestion_if_my_turn()
 
@@ -1429,6 +1461,7 @@ class WorkerThread(QThread):
             return expected_side == actor
 
         while self.worker_runing:
+            drain_rollout_results()
             screenshot, _ = await self.screenHelper.getScreenshot()
             if screenshot is None:
                 if not missing_reported:
@@ -1972,9 +2005,20 @@ class WorkerThread(QThread):
                                 f"手牌差分 {display_cards(payload)}，采用手牌差分"
                             )
                         print(f"微信牌局 >>> 我的出牌: {display_cards(payload)}")
+                        bump_generation(
+                            f"public_action:{self.my_position}:{payload}"
+                        )
                         self.played_card_signal.emit([self.my_position, payload])
                         self.record_hand_inference_action(self.my_position, payload)
                         apply_action_to_douzero(self.my_position, payload)
+                        persist_live_audit(
+                            "action",
+                            {
+                                "player": self.my_position,
+                                "cards": payload,
+                                "side": "me",
+                            },
+                        )
                         confirmed_my_hand = (
                             ""
                             if self_final_out
@@ -2014,11 +2058,27 @@ class WorkerThread(QThread):
                         self.card_recorder_signal.emit(wechat_other_hands_cards_str)
                         tracked_remaining[actor] = new_count
                         observed_remaining[actor] = new_count
-                        count_desync[actor] = False
+                        set_desync(
+                            actor,
+                            False,
+                            "matched_confirmed_action",
+                        )
                         recent_play[actor] = {"cards": "", "time": 0.0}
                         emit_remaining_counts()
+                        bump_generation(
+                            f"public_action:{player}:{cards}"
+                        )
                         self.record_hand_inference_action(player, cards)
                         apply_action_to_douzero(player, cards)
+                        persist_live_audit(
+                            "action",
+                            {
+                                "player": player,
+                                "cards": cards,
+                                "side": actor,
+                                "remaining": new_count,
+                            },
+                        )
                         expected_side = side_cycle[actor]
                         action_committed = True
                         if new_count == 0:
@@ -2043,12 +2103,20 @@ class WorkerThread(QThread):
                         if count == tracked:
                             if observed_remaining[side] != count or count_desync[side]:
                                 observed_remaining[side] = count
-                                count_desync[side] = False
+                                set_desync(
+                                    side,
+                                    False,
+                                    "screen_count_matches_history",
+                                )
                                 print(f"剩余张数 >>> {label}: {count} [画面确认]")
                                 emit_remaining_counts()
                         elif count < tracked:
                             candidate = opponent_candidate(side)
-                            count_desync[side] = candidate is None
+                            set_desync(
+                                side,
+                                candidate is None,
+                                "count_drop_without_matched_play",
+                            )
                             if count_desync[side]:
                                 observed_remaining[side] = count
                                 print(
@@ -2084,8 +2152,16 @@ class WorkerThread(QThread):
             except Exception as exc:
                 print(f"微信牌局接入异常（不会退出线程）: {exc}")
 
+            drain_rollout_results()
             await asyncio.sleep(0.35)
 
+        if self.current_round_id:
+            persist_live_audit(
+                "stop",
+                {"interrupted": True},
+            )
+            self.audit_writer.flush(0.5)
+        self._live_audit_hook = None
         print("微信小程序牌局接入线程已停止")
         print()
 
