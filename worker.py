@@ -725,17 +725,18 @@ class WorkerThread(QThread):
             ):
                 return False
 
-            if ess_ratio < self.config.rollout_min_ess_ratio:
-                suggestion_record["rollout_status"] = "skipped_low_ess"
-                return False
-
             # With async inference, the immediate DouZero recommendation is
-            # deliberately emitted before posterior sampling finishes.
+            # deliberately emitted before posterior sampling finishes. ESS is
+            # unknown here, so check it only after the matching result arrives.
             if (
                 self.config.inference_async_enabled
                 and worlds_override is None
             ):
                 suggestion_record["rollout_status"] = "waiting_inference"
+                return False
+
+            if ess_ratio < self.config.rollout_min_ess_ratio:
+                suggestion_record["rollout_status"] = "skipped_low_ess"
                 return False
 
             # Long shadow experiments start only after at least one live audit
