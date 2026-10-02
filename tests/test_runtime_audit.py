@@ -7,6 +7,44 @@ from runtime_audit import LiveAuditWriter
 
 
 class LiveAuditWriterTests(unittest.TestCase):
+    def test_final_persistence_is_absolute_and_sanitizes_non_finite(self):
+        with tempfile.TemporaryDirectory() as root:
+            writer = LiveAuditWriter(root)
+            try:
+                final_name = "round-final.json"
+                payload = {
+                    "event_seq": 5,
+                    "nan_value": float("nan"),
+                    "inf_value": float("inf"),
+                }
+                self.assertTrue(
+                    writer.finalize(
+                        "round-final",
+                        5,
+                        payload,
+                        final_name,
+                    )
+                )
+                status = writer.wait_persisted(
+                    "round-final",
+                    min_seq=5,
+                    timeout=2.0,
+                )
+                self.assertTrue(status["ok"])
+                final_path = os.path.join(
+                    writer.root,
+                    final_name,
+                )
+                self.assertTrue(os.path.isabs(final_path))
+                self.assertTrue(os.path.exists(final_path))
+
+                with open(final_path, "r", encoding="utf-8") as fp:
+                    loaded = json.load(fp)
+                self.assertIsNone(loaded["nan_value"])
+                self.assertIsNone(loaded["inf_value"])
+            finally:
+                writer.close(0.5)
+
     def test_live_updates_are_rejected_after_finalize_is_queued(self):
         with tempfile.TemporaryDirectory() as root:
             writer = LiveAuditWriter(root)
