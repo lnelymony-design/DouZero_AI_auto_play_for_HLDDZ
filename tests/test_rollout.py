@@ -1,5 +1,6 @@
 import unittest
 
+from constants import AllEnvCard, EnvCard2RealCard
 from douzero.env.game_new import GameEnv
 from inference.rollout import (
     PosteriorRolloutEvaluator,
@@ -13,30 +14,44 @@ class FirstLegalAgent:
         return action, 0.0, [(action, 0.0)]
 
 
+LANDLORD_HAND = sorted(AllEnvCard[:20])
+LANDLORD_DOWN_HAND = sorted(AllEnvCard[20:37])
+LANDLORD_UP_HAND = sorted(AllEnvCard[37:])
+
+
+def _real(cards):
+    return "".join(EnvCard2RealCard[card] for card in cards)
+
+
 class FakeInference:
     def posterior_worlds(self, max_worlds=8):
         return [
             {
                 "hands": {
-                    "landlord_down": "5",
-                    "landlord_up": "6",
+                    "landlord_down": _real(LANDLORD_DOWN_HAND),
+                    "landlord_up": _real(LANDLORD_UP_HAND),
                 },
                 "probability": 1.0,
             }
         ]
 
 
+def _public_env():
+    public = GameEnv(["landlord", None])
+    public.card_play_init(
+        {
+            "landlord": list(LANDLORD_HAND),
+            "landlord_down": list(LANDLORD_DOWN_HAND),
+            "landlord_up": list(LANDLORD_UP_HAND),
+            "three_landlord_cards": [],
+        }
+    )
+    return public
+
+
 class RolloutTests(unittest.TestCase):
     def test_cancelled_rollout_returns_structured_status(self):
-        public = GameEnv(["landlord", None])
-        public.card_play_init(
-            {
-                "landlord": [3, 4],
-                "landlord_down": [5],
-                "landlord_up": [6],
-                "three_landlord_cards": [],
-            }
-        )
+        public = _public_env()
         evaluator = PosteriorRolloutEvaluator(
             agents={
                 "landlord": FirstLegalAgent(),
@@ -61,15 +76,7 @@ class RolloutTests(unittest.TestCase):
         self.assertEqual(result["candidates"], [])
 
     def test_worlds_below_minimum_are_explicitly_insufficient(self):
-        public = GameEnv(["landlord", None])
-        public.card_play_init(
-            {
-                "landlord": [3, 4],
-                "landlord_down": [5],
-                "landlord_up": [6],
-                "three_landlord_cards": [],
-            }
-        )
+        public = _public_env()
         evaluator = PosteriorRolloutEvaluator(
             agents={
                 "landlord": FirstLegalAgent(),
@@ -94,15 +101,7 @@ class RolloutTests(unittest.TestCase):
         self.assertIsNone(result["best_action"])
 
     def test_rollout_returns_whole_game_values(self):
-        public = GameEnv(["landlord", None])
-        public.card_play_init(
-            {
-                "landlord": [3, 4],
-                "landlord_down": [5],
-                "landlord_up": [6],
-                "three_landlord_cards": [],
-            }
-        )
+        public = _public_env()
         evaluator = PosteriorRolloutEvaluator(
             agents={
                 "landlord": FirstLegalAgent(),
@@ -128,6 +127,39 @@ class RolloutTests(unittest.TestCase):
             self.assertLessEqual(item["rollout_value"], 1.0)
             self.assertGreaterEqual(item["control_share"], 0.0)
             self.assertLessEqual(item["control_share"], 1.0)
+
+    def test_invalid_partial_deck_is_rejected(self):
+        public = _public_env()
+        evaluator = PosteriorRolloutEvaluator(
+            agents={
+                "landlord": FirstLegalAgent(),
+                "landlord_down": FirstLegalAgent(),
+                "landlord_up": FirstLegalAgent(),
+            },
+            max_worlds=1,
+            min_worlds=1,
+            max_steps=12,
+            time_budget_seconds=1.0,
+        )
+        snapshot = snapshot_public_env(public, "landlord")
+        result = evaluator.evaluate_snapshot(
+            public_snapshot=snapshot,
+            worlds=[
+                {
+                    "hands": {
+                        "landlord_down": "5",
+                        "landlord_up": "6",
+                    },
+                    "probability": 1.0,
+                }
+            ],
+            candidates=["3", "4"],
+            my_position="landlord",
+        )
+        self.assertEqual(result["status"], "invalid_input")
+        self.assertTrue(result["errors"])
+
+
 
 
 if __name__ == "__main__":
