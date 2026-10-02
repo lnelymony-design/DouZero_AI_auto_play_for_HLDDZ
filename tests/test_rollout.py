@@ -1,7 +1,10 @@
 import unittest
 
 from douzero.env.game_new import GameEnv
-from inference.rollout import PosteriorRolloutEvaluator
+from inference.rollout import (
+    PosteriorRolloutEvaluator,
+    snapshot_public_env,
+)
 
 
 class FirstLegalAgent:
@@ -24,6 +27,39 @@ class FakeInference:
 
 
 class RolloutTests(unittest.TestCase):
+    def test_cancelled_rollout_returns_structured_status(self):
+        public = GameEnv(["landlord", None])
+        public.card_play_init(
+            {
+                "landlord": [3, 4],
+                "landlord_down": [5],
+                "landlord_up": [6],
+                "three_landlord_cards": [],
+            }
+        )
+        evaluator = PosteriorRolloutEvaluator(
+            agents={
+                "landlord": FirstLegalAgent(),
+                "landlord_down": FirstLegalAgent(),
+                "landlord_up": FirstLegalAgent(),
+            },
+            max_worlds=1,
+            min_worlds=1,
+            max_steps=12,
+            time_budget_seconds=1.0,
+        )
+        snapshot = snapshot_public_env(public, "landlord")
+        result = evaluator.evaluate_snapshot(
+            public_snapshot=snapshot,
+            worlds=FakeInference().posterior_worlds(),
+            candidates=["3", "4"],
+            my_position="landlord",
+            should_cancel=lambda: True,
+        )
+        self.assertEqual(result["status"], "cancelled")
+        self.assertEqual(result["worlds_completed"], 0)
+        self.assertEqual(result["candidates"], [])
+
     def test_rollout_returns_whole_game_values(self):
         public = GameEnv(["landlord", None])
         public.card_play_init(
