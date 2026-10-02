@@ -32,6 +32,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.create_actions()
 
         self.workerThread = None
+        self._close_pending = False
         self.observedRemainingCounts = {}
         self.currentMyPosition = None
         self.lastInferenceResult = {}
@@ -134,6 +135,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.workerThread.played_card_signal.connect(self.handle_played_card_update)
             self.workerThread.hand_inference_signal.connect(self.handle_hand_inference_update)
             self.workerThread.remaining_count_signal.connect(self.handle_remaining_count_update)
+            self.workerThread.finished.connect(self._on_worker_finished)
 
         if not self.workerThread.isRunning():
             self.workerThread.start()
@@ -142,27 +144,44 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.stop_worker_thread()
 
-    def stop_worker_thread(self):
+    def _on_worker_finished(self):
+        self.workerThread = None
+        self.startBtn.setText("启动")
+        self.startBtn.setEnabled(True)
+        self.set_status(False)
+
+        if self._close_pending:
+            self._close_pending = False
+            QtCore.QTimer.singleShot(0, self.close)
+
+    def stop_worker_thread(self, wait_ms=1200):
         if self.workerThread is None:
-            return
+            return True
 
         self.workerThread.stop_task()
         if self.workerThread.isRunning():
-            self.workerThread.wait(3000)
+            self.workerThread.wait(max(0, int(wait_ms)))
 
-        # The worker normally stops cooperatively. Keep a bounded fallback so a
-        # recognition loop can never make the GUI impossible to close again.
         if self.workerThread.isRunning():
-            print("工作线程未在 3 秒内停止，正在强制结束...")
-            self.workerThread.terminate()
-            self.workerThread.wait(1000)
+            # Never terminate the live-state QThread. The async rollout process
+            # is isolated and may be force-reaped by RolloutService instead.
+            print(
+                "工作线程仍在协作退出；不强制终止 live QThread，"
+                "窗口将在退出完成后自动关闭。"
+            )
+            self.startBtn.setText("正在停止...")
+            self.startBtn.setEnabled(False)
+            return False
 
-        self.workerThread = None
-        self.startBtn.setText("启动")
-        self.set_status(False)
+        self._on_worker_finished()
+        return True
 
     def closeEvent(self, event):
-        self.stop_worker_thread()
+        if not self.stop_worker_thread():
+            self._close_pending = True
+            event.ignore()
+            return
+
         if hasattr(self, "hudManager"):
             self.hudManager.close()
         event.accept()
