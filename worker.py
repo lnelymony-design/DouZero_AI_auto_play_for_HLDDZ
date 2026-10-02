@@ -1,7 +1,9 @@
 import asyncio
+import hashlib
 import json
 import os
 import time
+import uuid
 from collections import Counter
 from datetime import datetime
 
@@ -26,7 +28,9 @@ from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticM
 from utils import remove_chars_from_string
 from inference import HandInferenceEngine
 from inference.decision_policy import choose_recommendation
-from inference.rollout import PosteriorRolloutEvaluator
+from inference.rollout import snapshot_public_env
+from inference.rollout_service import RolloutJob, RolloutService
+from runtime_audit import LiveAuditWriter
 
 # 玩家位置（0：地主上家，1：地主，2：地主下家）
 PlayerPosition = ['landlord_up', 'landlord', 'landlord_down']
@@ -121,10 +125,17 @@ class WorkerThread(QThread):
             'landlord_down': "baselines/resnet/resnet_landlord_down.ckpt"
         }
         self.ai_agent_cache = {}
-        self.rollout_evaluator = None
-        self.rollout_init_failed = False
-        self.last_rollout_key = None
-        self.last_rollout_result = None
+        self.rollout_service = None
+        self.rollout_service_init_failed = False
+        self.session_id = uuid.uuid4().hex
+        self.rollout_generation = 0
+        self.rollout_posterior_revision = 0
+        self.rollout_accepting_results = True
+        self.current_round_id = None
+        self._live_audit_hook = None
+        self.audit_writer = LiveAuditWriter(
+            os.path.join("screenshots", "inference_audits")
+        )
 
         LandlordModel.init_model("baselines/resnet/resnet_landlord.ckpt")
 
@@ -134,6 +145,19 @@ class WorkerThread(QThread):
         try:
             self.loop.run_until_complete(self.run_task())
         finally:
+            self.rollout_accepting_results = False
+            if self.rollout_service is not None:
+                try:
+                    self.rollout_service.stop(
+                        self.config.rollout_shutdown_timeout_seconds
+                    )
+                except Exception as exc:
+                    print(f"后台Rollout停止失败: {exc}")
+                self.rollout_service = None
+            try:
+                self.audit_writer.close(0.75)
+            except Exception as exc:
+                print(f"审计写入器停止失败: {exc}")
             self.loop.close()
 
     async def run_task(self):
@@ -985,8 +1009,7 @@ class WorkerThread(QThread):
             douzero_paused_reason = None
             self.env = None
             self.hand_inference = None
-            self.last_rollout_key = None
-            self.last_rollout_result = None
+            self.current_round_id = None
             self.my_position_code = None
             self.my_position = ""
             self.action_list = []
@@ -1046,7 +1069,7 @@ class WorkerThread(QThread):
                 self.initOtherPlayerHandCards()
                 self.initAllPlayerCardData()
                 self.create_ai_representer()
-                self._ensure_rollout_evaluator()
+                self._ensure_rollout_service()
                 douzero_players = self.env.players
                 douzero_initial_data = {
                     key: list(value)
@@ -1990,6 +2013,16 @@ class WorkerThread(QThread):
     def stop_task(self):
         print("正在停止工作线程...")
         self.worker_runing = False
+        self.rollout_accepting_results = False
+        self.rollout_generation += 1
+        if self.rollout_service is not None:
+            try:
+                self.rollout_service.invalidate(
+                    self.rollout_generation,
+                    reason="worker_stop",
+                )
+            except Exception:
+                pass
         self.reset_ui_status()
     
     async def getThreeCards(self):
@@ -2292,7 +2325,15 @@ class WorkerThread(QThread):
         try:
             result = self.hand_inference.infer()
             self.last_hand_inference_result = result
+            self.rollout_posterior_revision += 1
             self.hand_inference_signal.emit(result)
+
+            hook = self._live_audit_hook
+            if hook is not None:
+                try:
+                    hook("inference")
+                except Exception as audit_exc:
+                    print(f"实时审计提交失败: {audit_exc}")
 
             summary = HandInferenceEngine.compact_summary(result)
             if summary:
@@ -2465,37 +2506,38 @@ class WorkerThread(QThread):
             self.ai_agent_cache[position] = agent
         return agent
 
-    def _ensure_rollout_evaluator(self):
+    def _ensure_rollout_service(self):
         if not getattr(self.config, "rollout_enabled", False):
             return None
-        if self.rollout_evaluator is not None:
-            return self.rollout_evaluator
-        if self.rollout_init_failed:
+        if self.rollout_service is not None:
+            return self.rollout_service
+        if self.rollout_service_init_failed:
             return None
 
         try:
-            agents = {
-                position: self._get_cached_agent(position)
-                for position in PlayerPosition
-            }
-            self.rollout_evaluator = PosteriorRolloutEvaluator(
-                agents=agents,
-                max_worlds=self.config.rollout_max_worlds,
-                min_worlds=self.config.rollout_min_worlds,
-                max_steps=self.config.rollout_max_steps,
-                time_budget_seconds=self.config.rollout_time_budget_seconds,
+            self.rollout_service = RolloutService(
+                model_paths=self.model_path_dict,
+                device=self.config.rollout_device,
+                cpu_threads=self.config.rollout_cpu_threads,
+                shutdown_timeout=(
+                    self.config.rollout_shutdown_timeout_seconds
+                ),
             )
             print(
-                "后验Rollout已初始化 >>> "
+                "后验Rollout后台服务启动中 >>> "
+                f"device={self.config.rollout_device} "
                 f"worlds<={self.config.rollout_max_worlds} "
                 f"budget={self.config.rollout_time_budget_seconds:.1f}s "
                 f"shadow={self.config.rollout_shadow_mode}"
             )
-            return self.rollout_evaluator
+            return self.rollout_service
         except Exception as exc:
-            self.rollout_init_failed = True
-            self.rollout_evaluator = None
-            print(f"后验Rollout初始化失败，自动降级为DouZero: {exc}")
+            self.rollout_service_init_failed = True
+            self.rollout_service = None
+            print(
+                "后验Rollout后台服务初始化失败，自动降级为DouZero: "
+                f"{exc}"
+            )
             return None
 
     def create_ai_representer(self):
