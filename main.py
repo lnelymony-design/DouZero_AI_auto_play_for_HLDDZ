@@ -1,4 +1,5 @@
 import asyncio
+import multiprocessing
 import os
 import signal
 import sys
@@ -17,25 +18,23 @@ def _configure_qt_plugin_paths():
         os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", platform_root)
 
 
-_configure_qt_plugin_paths()
+def main():
+    # Keep Qt imports and GUI construction out of spawn child bootstrap.
+    _configure_qt_plugin_paths()
 
-import qasync
-from PyQt5 import QtCore
+    import qasync
+    from PyQt5 import QtCore
+    from main_window import MainWindow
 
-from main_window import MainWindow
-
-
-if __name__ == "__main__":
     app = qasync.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
-    mainWindow = MainWindow()
-    mainWindow.show()
+    main_window = MainWindow()
+    main_window.show()
 
-    # Keep shutdown state mutable because this code runs at module scope.
     shutdown_state = {"active": False}
 
     def shutdown(*_):
@@ -43,16 +42,16 @@ if __name__ == "__main__":
             return
         shutdown_state["active"] = True
         print("正在退出程序...")
-        try:
-            mainWindow.close()
-        finally:
+        main_window.close()
+        if not main_window.isVisible():
             app.quit()
+        else:
+            # closeEvent may intentionally defer closing while the live worker
+            # exits cooperatively. Retry without starting a second event loop.
+            shutdown_state["active"] = False
 
-    # Make Ctrl+C work reliably while Qt owns the foreground event loop.
     signal.signal(signal.SIGINT, shutdown)
 
-    # On Windows, periodically hand control back to Python so SIGINT is
-    # processed promptly even when there is no other Qt activity.
     signal_timer = QtCore.QTimer()
     signal_timer.timeout.connect(lambda: None)
     signal_timer.start(200)
@@ -64,3 +63,8 @@ if __name__ == "__main__":
             loop.run_forever()
     except KeyboardInterrupt:
         shutdown()
+
+
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    main()
