@@ -627,6 +627,21 @@ class HandInferenceEngine:
         hidden_pool = self._current_hidden_pool(played, current_my_hand)
         remaining_counts = self._remaining_counts(played)
         forced_landlord = self._forced_landlord_cards(played)
+
+        # Bottom cards come from OCR. They are strong public evidence, but a
+        # single OCR error must not eliminate every legal hidden world. If the
+        # forced residual bottom copies no longer fit the exact deck after
+        # confirmed public actions, relax the *entire* bottom constraint for
+        # this posterior state and record why.
+        bottom_conflicts = [
+            card
+            for card, count in forced_landlord.items()
+            if hidden_pool[card] < count
+        ]
+        bottom_constraint_relaxed = bool(bottom_conflicts)
+        if bottom_constraint_relaxed:
+            forced_landlord = Counter()
+
         pass_contexts, play_contexts = self._build_behavior_contexts()
 
         sampled_hands = []
@@ -738,6 +753,8 @@ class HandInferenceEngine:
                 "players": {},
                 "samples": 0,
                 "effective_samples": 0.0,
+                "bottom_constraint_relaxed": bottom_constraint_relaxed,
+                "bottom_conflicts": bottom_conflicts,
                 "warning": "No legal hidden-card samples remain.",
             }
 
@@ -883,6 +900,8 @@ class HandInferenceEngine:
                 effective_samples / len(weighted_samples), 3
             ) if weighted_samples else 0.0,
             "behavior_model": "heuristic_v2_tempered",
+            "bottom_constraint_relaxed": bottom_constraint_relaxed,
+            "bottom_conflicts": bottom_conflicts,
         }
 
     def posterior_worlds(self, max_worlds=24, allow_infer=True):
@@ -1084,4 +1103,13 @@ class HandInferenceEngine:
                 + " ".join(card_parts)
                 + f" bomb:{data['any_bomb']:.0%}"
             )
-        return " | ".join(parts)
+        summary = " | ".join(parts)
+        if result.get("bottom_constraint_relaxed"):
+            conflicts = ",".join(result.get("bottom_conflicts") or [])
+            suffix = (
+                f" [底牌约束降级:{conflicts}]"
+                if conflicts
+                else " [底牌约束降级]"
+            )
+            summary += suffix
+        return summary
