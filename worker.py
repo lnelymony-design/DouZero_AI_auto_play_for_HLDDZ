@@ -595,6 +595,17 @@ class WorkerThread(QThread):
                     stale_reason = "suggestion_service_epoch_mismatch"
                 elif expected_dispatch_id != result.dispatch_id:
                     stale_reason = "dispatch_id_mismatch"
+                elif result.session_id != self.session_id:
+                    stale_reason = "session_mismatch"
+                elif result.round_id != self.current_round_id:
+                    stale_reason = "round_mismatch"
+                elif result.generation_id != self.rollout_generation:
+                    stale_reason = "generation_mismatch"
+                elif (
+                    result.posterior_revision
+                    != self.rollout_posterior_revision
+                ):
+                    stale_reason = "posterior_revision_mismatch"
                 elif (
                     created_monotonic is not None
                     and now_monotonic - float(created_monotonic)
@@ -608,17 +619,6 @@ class WorkerThread(QThread):
                     > self.config.rollout_result_max_screen_age_seconds
                 ):
                     stale_reason = "screen_stale"
-                elif result.session_id != self.session_id:
-                    stale_reason = "session_mismatch"
-                elif result.round_id != self.current_round_id:
-                    stale_reason = "round_mismatch"
-                elif result.generation_id != self.rollout_generation:
-                    stale_reason = "generation_mismatch"
-                elif (
-                    result.posterior_revision
-                    != self.rollout_posterior_revision
-                ):
-                    stale_reason = "posterior_revision_mismatch"
                 elif record is None:
                     stale_reason = "suggestion_not_found"
                 elif result.suggestion_id != active_suggestion_id:
