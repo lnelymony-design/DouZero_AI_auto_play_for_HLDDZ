@@ -92,6 +92,22 @@ class PosteriorControlTests(unittest.TestCase):
             player["cards"]["K"],
         )
 
+    def test_cache_only_world_export_never_triggers_infer(self):
+        engine = self._engine()
+        self.assertEqual(
+            engine.posterior_worlds(
+                max_worlds=8,
+                allow_infer=False,
+            ),
+            [],
+        )
+        engine.infer()
+        worlds = engine.posterior_worlds(
+            max_worlds=8,
+            allow_infer=False,
+        )
+        self.assertTrue(worlds)
+
     def test_posterior_worlds_are_joint_and_normalized(self):
         engine = self._engine()
         engine.observe("landlord_down", "7")
