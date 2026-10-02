@@ -278,6 +278,7 @@ class WorkerThread(QThread):
         active_suggestion_id = None
         inference_dirty = False
         inference_jobs = {}
+        bottom_cards_trusted = True
         last_init_diag_signature = None
         last_init_diag_time = 0.0
         scene_blank_frames = 0
@@ -391,6 +392,7 @@ class WorkerThread(QThread):
                         self.hand_inference.three_landlord_cards
                     )
                 ),
+                "bottom_cards_trusted": bottom_cards_trusted,
                 "public_history": history,
                 "tracked_remaining": dict(tracked_remaining),
                 "observed_remaining": dict(observed_remaining),
@@ -783,6 +785,9 @@ class WorkerThread(QThread):
                 self.env,
                 self.my_position,
             )
+            if not bottom_cards_trusted:
+                public_snapshot["three_landlord_cards"] = []
+                suggestion_record["bottom_cards_trusted"] = False
             hash_payload = {
                 "public": public_snapshot,
                 "candidates": candidates,
@@ -1017,6 +1022,7 @@ class WorkerThread(QThread):
 
         def drain_inference_results():
             nonlocal last_inference_service_error_reported
+            nonlocal bottom_cards_trusted, douzero_initial_data
             if self.inference_service is None:
                 return
 
@@ -1095,6 +1101,43 @@ class WorkerThread(QThread):
                 inference_result = payload.get("inference") or {}
                 worlds = payload.get("worlds") or []
                 profiles = payload.get("profiles") or {}
+
+                if (
+                    inference_result.get("bottom_constraint_relaxed")
+                    and bottom_cards_trusted
+                ):
+                    bottom_cards_trusted = False
+                    conflicts = list(
+                        inference_result.get("bottom_conflicts") or []
+                    )
+                    print(
+                        "底牌约束已降级 >>> OCR底牌与已确认牌局历史冲突"
+                        + (
+                            f"；冲突牌={','.join(conflicts)}"
+                            if conflicts else ""
+                        )
+                    )
+
+                    if douzero_initial_data is not None:
+                        douzero_initial_data[
+                            "three_landlord_cards"
+                        ] = []
+                        rebuild_douzero_from_history()
+
+                    persist_live_audit(
+                        "bottom_constraint_relaxed",
+                        {
+                            "ocr_bottom": "".join(
+                                self.hand_inference.three_landlord_cards
+                            )
+                            if self.hand_inference is not None
+                            else "",
+                            "conflicts": conflicts,
+                            "douzero_bottom_cleared": (
+                                douzero_initial_data is not None
+                            ),
+                        },
+                    )
                 self.last_inference_duration_seconds = float(
                     payload.get("elapsed_seconds", 0.0) or 0.0
                 )
@@ -1256,6 +1299,16 @@ class WorkerThread(QThread):
                             )
                         ),
                         "worlds": len(worlds),
+                        "bottom_constraint_relaxed": bool(
+                            inference_result.get(
+                                "bottom_constraint_relaxed"
+                            )
+                        ),
+                        "bottom_conflicts": list(
+                            inference_result.get(
+                                "bottom_conflicts"
+                            ) or []
+                        ),
                     },
                 )
 
@@ -1966,7 +2019,7 @@ class WorkerThread(QThread):
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
             nonlocal last_init_diag_signature, last_init_diag_time
             nonlocal self_hand_missing_frames, midgame_wait_announced
-            nonlocal active_suggestion_id
+            nonlocal active_suggestion_id, bottom_cards_trusted
 
             print(f"[ROUND/RESET] {reason}，清理上一局缓存，等待下一局")
             if (
@@ -2013,6 +2066,7 @@ class WorkerThread(QThread):
             douzero_players = None
             douzero_paused_reason = None
             active_suggestion_id = None
+            bottom_cards_trusted = True
             inference_jobs.clear()
             self.last_hand_inference_result = None
             self.last_inference_generation = None
@@ -2035,6 +2089,7 @@ class WorkerThread(QThread):
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
             nonlocal audit_event_seq, audit_status, suggestion_seq
             nonlocal active_suggestion_id, inference_dirty
+            nonlocal bottom_cards_trusted
 
             self.current_round_id = (
                 datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -2047,6 +2102,7 @@ class WorkerThread(QThread):
             suggestion_seq = 0
             active_suggestion_id = None
             inference_dirty = False
+            bottom_cards_trusted = True
             self.rollout_accepting_results = True
             self.last_hand_inference_result = None
             self.last_inference_generation = None
