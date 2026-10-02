@@ -37,6 +37,8 @@ class LiveAuditWriter:
         self._finalizing = set()
         self._coalesced = {}
         self._last_error = None
+        self._last_reported_error = None
+        self._last_final_path = None
         self._inflight = False
         self._thread.start()
 
@@ -185,6 +187,8 @@ class LiveAuditWriter:
                     "pending_live": len(self._pending_live),
                     "pending_final": len(self._pending_final),
                     "inflight": self._inflight,
+                    "root": self.root,
+                    "last_final_path": self._last_final_path,
                 }
             key = str(round_id)
             return {
@@ -195,6 +199,8 @@ class LiveAuditWriter:
                 "finalizing": key in self._finalizing,
                 "last_error": self._last_error,
                 "inflight": self._inflight,
+                "root": self.root,
+                "last_final_path": self._last_final_path,
             }
 
     def flush(self, timeout=0.75):
@@ -278,6 +284,13 @@ class LiveAuditWriter:
             self._finalizing.discard(round_id)
             self._finalized.add(round_id)
             self._last_error = None
+            self._last_reported_error = None
+            self._last_final_path = os.path.abspath(final_path)
+
+        print(
+            "推牌审计final已落盘 >>> "
+            f"{os.path.abspath(final_path)}"
+        )
 
     def _run(self):
         while True:
@@ -299,8 +312,12 @@ class LiveAuditWriter:
                 else:
                     self._persist_final(*data)
             except Exception as exc:
+                report_error = False
                 with self._lock:
                     self._last_error = repr(exc)
+                    if self._last_reported_error != self._last_error:
+                        self._last_reported_error = self._last_error
+                        report_error = True
 
                     if not self._stop.is_set():
                         if kind == "live":
@@ -316,6 +333,11 @@ class LiveAuditWriter:
                                 )
                         else:
                             self._pending_final.appendleft(data)
+                if report_error:
+                    print(
+                        "推牌审计后台写入失败 >>> "
+                        f"root={self.root} error={self._last_error}"
+                    )
                 # Preserve the previous valid file and retry without spinning.
                 time.sleep(0.10)
             finally:
