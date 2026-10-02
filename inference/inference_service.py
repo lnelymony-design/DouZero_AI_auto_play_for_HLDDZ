@@ -364,7 +364,12 @@ class InferenceService:
 
     def _take_pending_for_dispatch(self):
         with self._lock:
-            if self._pending is None or self._closed or self._failed:
+            if (
+                self._pending is None
+                or self._running is not None
+                or self._closed
+                or self._failed
+            ):
                 return None
 
             job, dispatch_id, dispatch_seq = self._pending
