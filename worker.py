@@ -116,6 +116,9 @@ class WorkerThread(QThread):
         # 概率推牌器：利用已知手牌、底牌、出牌和 Pass 动作推测两家剩余手牌。
         self.hand_inference = None
         self.last_hand_inference_result = None
+        self.last_inference_duration_seconds = 0.0
+        self.last_douzero_duration_seconds = 0.0
+        self.last_rollout_export_duration_seconds = 0.0
 
         self.try_num = 3
         self.round_count = 0
@@ -262,7 +265,11 @@ class WorkerThread(QThread):
         round_boundary_seen = False
         midgame_wait_announced = False
         last_successful_screenshot_monotonic = 0.0
+        previous_successful_screenshot_monotonic = None
+        last_frame_gap_seconds = None
+        max_frame_gap_seconds = 0.0
         last_audit_error_reported = None
+        last_rollout_service_error_reported = None
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
         landlord_start_side = {0: "right", 1: "me", 2: "left"}
@@ -394,6 +401,20 @@ class WorkerThread(QThread):
                     "rollout_time_budget_seconds": (
                         self.config.rollout_time_budget_seconds
                     ),
+                    "hidden_info_audit": "pending_p1",
+                },
+                "performance": {
+                    "last_frame_gap_seconds": last_frame_gap_seconds,
+                    "max_frame_gap_seconds": max_frame_gap_seconds,
+                    "last_inference_seconds": (
+                        self.last_inference_duration_seconds
+                    ),
+                    "last_douzero_seconds": (
+                        self.last_douzero_duration_seconds
+                    ),
+                    "last_rollout_export_seconds": (
+                        self.last_rollout_export_duration_seconds
+                    ),
                 },
                 "rollout_service": (
                     None
@@ -489,8 +510,25 @@ class WorkerThread(QThread):
             return True
 
         def drain_rollout_results():
+            nonlocal last_rollout_service_error_reported
             if self.rollout_service is None:
                 return
+
+            service_status = self.rollout_service.status()
+            service_error = service_status.get("fatal_error")
+            if (
+                service_error
+                and service_error
+                != last_rollout_service_error_reported
+            ):
+                print(
+                    "后台Rollout服务已降级关闭 >>> "
+                    f"{service_error}"
+                )
+                last_rollout_service_error_reported = service_error
+            elif not service_error:
+                last_rollout_service_error_reported = None
+
             for result in self.rollout_service.drain_results(8):
                 record = next(
                     (
@@ -650,6 +688,7 @@ class WorkerThread(QThread):
             raw_actions,
             ess_ratio,
         ):
+            export_started = time.perf_counter()
             if (
                 self.rollout_service is None
                 or self.hand_inference is None
@@ -716,6 +755,7 @@ class WorkerThread(QThread):
                     ensure_ascii=False,
                     sort_keys=True,
                     separators=(",", ":"),
+                    allow_nan=False,
                 ).encode("utf-8")
             ).hexdigest()
 
@@ -747,11 +787,13 @@ class WorkerThread(QThread):
                     public_snapshot,
                     ensure_ascii=False,
                     separators=(",", ":"),
+                    allow_nan=False,
                 ),
                 worlds_json=json.dumps(
                     worlds,
                     ensure_ascii=False,
                     separators=(",", ":"),
+                    allow_nan=False,
                 ),
                 candidates=tuple(candidates),
                 my_position=self.my_position,
@@ -776,6 +818,12 @@ class WorkerThread(QThread):
 
             suggestion_record["rollout_dispatch_id"] = dispatch_id
             suggestion_record["rollout_status"] = "submitted"
+            self.last_rollout_export_duration_seconds = (
+                time.perf_counter() - export_started
+            )
+            suggestion_record["rollout_export_seconds"] = (
+                self.last_rollout_export_duration_seconds
+            )
             persist_live_audit(
                 "rollout_submitted",
                 {
@@ -884,8 +932,12 @@ class WorkerThread(QThread):
                 return
 
             try:
+                douzero_started = time.perf_counter()
                 action_message, action_list = self.env.step(
                     self.my_position, action=None, update=False
+                )
+                self.last_douzero_duration_seconds = (
+                    time.perf_counter() - douzero_started
                 )
                 self.action_message = action_message
 
@@ -1315,7 +1367,16 @@ class WorkerThread(QThread):
                     env.step(hist_player, action=action_env, update=True)
 
                 self.env = env
+                previous_pause = douzero_paused_reason
                 douzero_paused_reason = None
+                if previous_pause is not None:
+                    bump_generation(
+                        f"douzero_resume:{previous_pause}"
+                    )
+                    persist_live_audit(
+                        "resume",
+                        {"previous_reason": previous_pause},
+                    )
                 return True
             except Exception as exc:
                 pause_douzero(f"历史重建失败：{exc}")
@@ -1699,7 +1760,18 @@ class WorkerThread(QThread):
                 continue
 
             missing_reported = False
-            last_successful_screenshot_monotonic = time.monotonic()
+            screenshot_now = time.monotonic()
+            if previous_successful_screenshot_monotonic is not None:
+                last_frame_gap_seconds = (
+                    screenshot_now
+                    - previous_successful_screenshot_monotonic
+                )
+                max_frame_gap_seconds = max(
+                    max_frame_gap_seconds,
+                    last_frame_gap_seconds,
+                )
+            previous_successful_screenshot_monotonic = screenshot_now
+            last_successful_screenshot_monotonic = screenshot_now
             flush_round_audit_if_due(screenshot)
             if not screenshot_saved:
                 os.makedirs('screenshots', exist_ok=True)
@@ -2934,7 +3006,11 @@ class WorkerThread(QThread):
             return
 
         try:
+            inference_started = time.perf_counter()
             result = self.hand_inference.infer()
+            self.last_inference_duration_seconds = (
+                time.perf_counter() - inference_started
+            )
             self.last_hand_inference_result = result
             self.rollout_posterior_revision += 1
             if self.stop_requested_event.is_set():
@@ -2953,6 +3029,10 @@ class WorkerThread(QThread):
                 print("推牌 >>>", summary)
                 print()
         except Exception as exc:
+            if "inference_started" in locals():
+                self.last_inference_duration_seconds = (
+                    time.perf_counter() - inference_started
+                )
             # 推牌器属于辅助层，任何异常都不能打断原项目的识牌和 DouZero 流程。
             print(f"推牌器更新失败: {exc}")
             hook = self._live_audit_hook
