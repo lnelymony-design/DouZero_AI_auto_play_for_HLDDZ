@@ -229,6 +229,8 @@ class WorkerThread(QThread):
         expected_side = None
         confirmed_my_hand = None
         pre_landlord_hand = None
+        bottom_full_candidate = None
+        bottom_full_candidate_time = 0.0
         preinit_counts = {"left": None, "right": None}
         tracked_remaining = {"left": None, "right": None}
         observed_remaining = {"left": None, "right": None}
@@ -1529,6 +1531,7 @@ class WorkerThread(QThread):
             """Clear stale per-round recognition state at a visual boundary."""
             nonlocal round_signature, expected_side, confirmed_my_hand
             nonlocal pre_landlord_hand, wechat_other_hands_cards_str
+            nonlocal bottom_full_candidate, bottom_full_candidate_time
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
             nonlocal last_init_diag_signature, last_init_diag_time
             nonlocal self_hand_missing_frames, midgame_wait_announced
@@ -1549,6 +1552,8 @@ class WorkerThread(QThread):
             expected_side = None
             confirmed_my_hand = None
             pre_landlord_hand = None
+            bottom_full_candidate = None
+            bottom_full_candidate_time = 0.0
             wechat_other_hands_cards_str = ""
             preinit_counts["left"] = None
             preinit_counts["right"] = None
@@ -1912,10 +1917,16 @@ class WorkerThread(QThread):
                         last_state["position_code"] = position_code
 
                     raw_bottom = recognizer.recognize_bottom_cards(screenshot)
+                    if raw_bottom is not None and len(raw_bottom) == 3:
+                        bottom_full_candidate = raw_bottom
+                        bottom_full_candidate_time = now
+
                     top_bottom = stable_value(
                         "three_cards", raw_bottom, frames=2
                     )
                     three_cards = top_bottom
+                    bottom_source = ""
+
                     if (
                         last_state["position_code"] == 1
                         and init_hand is not None
@@ -1925,14 +1936,37 @@ class WorkerThread(QThread):
                         added = hand_difference(init_hand, pre_landlord_hand)
                         if added is not None and len(added) == 3:
                             three_cards = added
+                            bottom_source = " [17→20手牌差分]"
+
+                    # Transition frames can show all three cards once and then
+                    # slide/occlude one slot. Trust that full observation only
+                    # after the later stable partial remains a multiset subset
+                    # of it. This preserves evidence instead of requiring two
+                    # identical full frames that the UI may never provide.
+                    if (
+                        (three_cards is None or len(three_cards) != 3)
+                        and bottom_full_candidate
+                        and now - bottom_full_candidate_time <= 5.0
+                        and top_bottom
+                        and 0 < len(top_bottom) < 3
+                    ):
+                        full_counter = Counter(bottom_full_candidate)
+                        partial_counter = Counter(top_bottom)
+                        if all(
+                            partial_counter[card] <= full_counter[card]
+                            for card in partial_counter
+                        ):
+                            three_cards = bottom_full_candidate
+                            bottom_source = (
+                                " [单帧完整+后续稳定部分一致]"
+                            )
+                        else:
+                            bottom_full_candidate = None
+                            bottom_full_candidate_time = 0.0
 
                     if three_cards is not None and len(three_cards) == 3:
                         if three_cards != last_state["three_cards"]:
-                            source = (
-                                " [17→20手牌差分]"
-                                if last_state["position_code"] == 1
-                                else ""
-                            )
+                            source = bottom_source
                             print(
                                 f"微信专用识牌 >>> 三张底牌: "
                                 f"{display_cards(three_cards)}{source}"
@@ -2040,6 +2074,9 @@ class WorkerThread(QThread):
                         bottom_debug = getattr(
                             recognizer, "last_bottom_debug", None
                         )
+                        bottom_layout = getattr(
+                            recognizer, "last_bottom_layout", None
+                        )
                         slot_debug = ""
                         if bottom_debug:
                             parts = []
@@ -2057,6 +2094,11 @@ class WorkerThread(QThread):
                                     f"/{score_text}/{source}"
                                 )
                             slot_debug = " | slots " + " ".join(parts)
+                        if bottom_layout:
+                            slot_debug += (
+                                f" | layout={bottom_layout.get('name')}"
+                                f" dx={bottom_layout.get('dx'):+.3f}"
+                            )
                         print(
                             f"[INIT/BOTTOM] raw={display_cards(raw_bottom)} "
                             f"stable={display_cards(top_bottom)} "
