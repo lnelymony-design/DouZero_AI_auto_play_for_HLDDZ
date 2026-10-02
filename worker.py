@@ -143,13 +143,23 @@ class WorkerThread(QThread):
         self.stop_requested_event = threading.Event()
         self.current_round_id = None
         self._live_audit_hook = None
+        project_root = os.path.dirname(os.path.abspath(__file__))
         self.audit_root = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
+            project_root,
             "screenshots",
             "inference_audits",
         )
+        self.audit_mirror_root = os.path.join(
+            project_root,
+            "audit_exports",
+        )
         self.audit_writer = LiveAuditWriter(self.audit_root)
+        os.makedirs(self.audit_mirror_root, exist_ok=True)
         print(f"推牌审计目录 >>> {self.audit_writer.root}")
+        print(
+            "推牌审计镜像目录 >>> "
+            f"{os.path.abspath(self.audit_mirror_root)}"
+        )
 
         LandlordModel.init_model("baselines/resnet/resnet_landlord.ckpt")
 
@@ -1993,22 +2003,42 @@ class WorkerThread(QThread):
                 )
                 payload["event_seq"] = pending_round_audit["event_seq"]
 
-                submitted = self.audit_writer.finalize(
+                flush_ok = self.audit_writer.flush(1.5)
+                if not flush_ok:
+                    print(
+                        "推牌审计live flush超时 >>> "
+                        f"{self.audit_writer.status(pending_round_audit['round_id'])}"
+                    )
+
+                mirror_path = os.path.join(
+                    self.audit_mirror_root,
+                    json_name,
+                )
+                result = self.audit_writer.finalize_sync(
                     pending_round_audit["round_id"],
                     pending_round_audit["event_seq"],
                     payload,
                     json_name,
+                    mirror_path=mirror_path,
+                    verify_delay=0.5,
                 )
-                if submitted:
+                if result.get("ok"):
                     print(
-                        "推牌审计final已排队 >>> "
-                        f"{os.path.abspath(os.path.join(root, json_name))} "
-                        f"(结算截图 {len(payload['screenshots'])} 张)"
+                        "推牌审计final同步已落盘 >>> "
+                        f"{result.get('path')} "
+                        f"(size={result.get('size')} bytes)"
+                    )
+                    print(
+                        "推牌审计final镜像已落盘 >>> "
+                        f"{result.get('mirror_path')} "
+                        f"(size={result.get('mirror_size')} bytes)"
                     )
                 else:
                     print(
-                        "推牌审计final未重复提交 >>> "
-                        f"{pending_round_audit['round_id']}"
+                        "推牌审计final同步写入失败 >>> "
+                        f"error={result.get('error')} "
+                        f"path={result.get('path')} "
+                        f"mirror={result.get('mirror_path')}"
                     )
                 pending_round_audit = None
             except Exception as exc:
