@@ -3,9 +3,10 @@ import hashlib
 import json
 import os
 import time
+import threading
 import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 
 from PyQt5.QtCore import pyqtSignal, QThread
 
@@ -131,6 +132,7 @@ class WorkerThread(QThread):
         self.rollout_generation = 0
         self.rollout_posterior_revision = 0
         self.rollout_accepting_results = True
+        self.stop_requested_event = threading.Event()
         self.current_round_id = None
         self._live_audit_hook = None
         self.audit_writer = LiveAuditWriter(
@@ -248,6 +250,8 @@ class WorkerThread(QThread):
         suggestion_audit = []
         pending_round_audit = None
         audit_event_seq = 0
+        audit_events = []
+        audit_status = "idle"
         suggestion_seq = 0
         active_suggestion_id = None
         inference_dirty = False
@@ -332,12 +336,18 @@ class WorkerThread(QThread):
                 ]
 
             payload = {
-                "format": "wechat_live_audit_v5",
+                "format": "wechat_live_inference_audit_v5",
+                "schema_version": 5,
                 "session_id": self.session_id,
                 "round_id": self.current_round_id,
+                "status": audit_status,
                 "event_type": str(event_type),
                 "event_seq": audit_event_seq,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(
+                    timespec="milliseconds"
+                ),
+                "events": list(audit_events),
                 "generation_id": self.rollout_generation,
                 "posterior_revision": self.rollout_posterior_revision,
                 "my_position": self.my_position,
@@ -398,7 +408,8 @@ class WorkerThread(QThread):
             return payload
 
         def persist_live_audit(event_type, extra=None):
-            nonlocal audit_event_seq, last_audit_error_reported
+            nonlocal audit_event_seq, audit_status
+            nonlocal last_audit_error_reported
             if not self.current_round_id:
                 return False
 
@@ -415,7 +426,30 @@ class WorkerThread(QThread):
             elif not writer_error:
                 last_audit_error_reported = None
 
+            if event_type == "init":
+                audit_status = "active"
+            elif event_type in ("round_end", "settlement_started"):
+                audit_status = "settling"
+            elif event_type in (
+                "stop_requested",
+                "stop",
+                "round_reset",
+            ):
+                audit_status = "interrupted"
+
             audit_event_seq += 1
+            event = {
+                "event_seq": audit_event_seq,
+                "event_type": str(event_type),
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(
+                    timespec="milliseconds"
+                ),
+                "generation_id": self.rollout_generation,
+                "posterior_revision": self.rollout_posterior_revision,
+                "detail": dict(extra or {}),
+            }
+            audit_events.append(event)
+
             payload = build_live_audit_payload(event_type, extra)
             payload["event_seq"] = audit_event_seq
             return self.audit_writer.submit_live(
@@ -581,12 +615,27 @@ class WorkerThread(QThread):
                         f"{payload.get('elapsed_seconds', 0):.2f}s]"
                     )
 
+                rollout_event = (
+                    "rollout_completed"
+                    if result.status in ("ok", "partial")
+                    else "rollout_cancelled"
+                    if result.status in (
+                        "cancelled",
+                        "expired",
+                        "superseded",
+                        "deadline",
+                        "insufficient_worlds",
+                    )
+                    else "rollout_failed"
+                )
                 persist_live_audit(
-                    "rollout",
+                    rollout_event,
                     {
                         "suggestion_id": result.suggestion_id,
                         "job_id": result.job_id,
+                        "dispatch_id": result.dispatch_id,
                         "status": result.status,
+                        "error": result.error,
                     },
                 )
 
@@ -722,6 +771,18 @@ class WorkerThread(QThread):
 
             suggestion_record["rollout_dispatch_id"] = dispatch_id
             suggestion_record["rollout_status"] = "submitted"
+            persist_live_audit(
+                "rollout_submitted",
+                {
+                    "suggestion_id": suggestion_record["suggestion_id"],
+                    "job_id": job_id,
+                    "dispatch_id": dispatch_id,
+                    "generation_id": self.rollout_generation,
+                    "posterior_revision": (
+                        self.rollout_posterior_revision
+                    ),
+                },
+            )
             return True
 
         self._live_audit_hook = persist_live_audit
@@ -802,6 +863,11 @@ class WorkerThread(QThread):
         def emit_douzero_suggestion_if_my_turn():
             nonlocal douzero_paused_reason, suggestion_seq
             nonlocal active_suggestion_id
+            if (
+                self.stop_requested_event.is_set()
+                or not self.rollout_accepting_results
+            ):
+                return
             if any(count_desync.values()):
                 pause_douzero("等待对手出牌与剩余张数完成匹配")
                 return
@@ -1404,7 +1470,7 @@ class WorkerThread(QThread):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
-            nonlocal audit_event_seq, suggestion_seq
+            nonlocal audit_event_seq, audit_status, suggestion_seq
             nonlocal active_suggestion_id, inference_dirty
 
             self.current_round_id = (
@@ -1413,6 +1479,8 @@ class WorkerThread(QThread):
                 + uuid.uuid4().hex[:6]
             )
             audit_event_seq = 0
+            audit_events.clear()
+            audit_status = "active"
             suggestion_seq = 0
             active_suggestion_id = None
             inference_dirty = False
@@ -1555,6 +1623,15 @@ class WorkerThread(QThread):
             return expected_side == actor
 
         while self.worker_runing:
+            if self.stop_requested_event.is_set():
+                bump_generation("stop_requested")
+                persist_live_audit(
+                    "stop_requested",
+                    {"reason": "user_stop"},
+                )
+                self.worker_runing = False
+                break
+
             drain_rollout_results()
             screenshot, _ = await self.screenHelper.getScreenshot()
             if screenshot is None:
@@ -2471,17 +2548,14 @@ class WorkerThread(QThread):
 
     def stop_task(self):
         print("正在停止工作线程...")
-        self.worker_runing = False
         self.rollout_accepting_results = False
-        self.rollout_generation += 1
-        if self.rollout_service is not None:
-            try:
-                self.rollout_service.invalidate(
-                    self.rollout_generation,
-                    reason="worker_stop",
-                )
-            except Exception:
-                pass
+        self.stop_requested_event.set()
+
+        # The WeChat live thread owns generation/history and performs the
+        # actual invalidation at its next safe frame boundary.
+        if getattr(self.config, "platform", "") != "wechat_miniapp":
+            self.worker_runing = False
+
         self.reset_ui_status()
     
     async def getThreeCards(self):
@@ -2785,12 +2859,14 @@ class WorkerThread(QThread):
             result = self.hand_inference.infer()
             self.last_hand_inference_result = result
             self.rollout_posterior_revision += 1
+            if self.stop_requested_event.is_set():
+                return
             self.hand_inference_signal.emit(result)
 
             hook = self._live_audit_hook
             if hook is not None:
                 try:
-                    hook("inference")
+                    hook("inference_completed")
                 except Exception as audit_exc:
                     print(f"实时审计提交失败: {audit_exc}")
 
@@ -2801,6 +2877,15 @@ class WorkerThread(QThread):
         except Exception as exc:
             # 推牌器属于辅助层，任何异常都不能打断原项目的识牌和 DouZero 流程。
             print(f"推牌器更新失败: {exc}")
+            hook = self._live_audit_hook
+            if hook is not None:
+                try:
+                    hook(
+                        "inference_failed",
+                        {"error": repr(exc)},
+                    )
+                except Exception:
+                    pass
             print()
 
     def record_hand_inference_action(self, player, cards):
