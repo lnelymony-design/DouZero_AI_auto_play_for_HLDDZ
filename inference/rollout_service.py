@@ -642,6 +642,13 @@ class RolloutService:
             if timeout is None
             else max(0.0, float(timeout))
         )
+        deadline = time.monotonic() + timeout
+
+        def remaining(cap=None):
+            left = max(0.0, deadline - time.monotonic())
+            if cap is None:
+                return left
+            return min(left, max(0.0, float(cap)))
 
         with self._lock:
             if self._closed:
@@ -661,17 +668,22 @@ class RolloutService:
         except Exception:
             pass
 
-        self._bridge.join(timeout=min(timeout, 0.5))
+        self._bridge.join(timeout=remaining(0.25))
         if (
             hasattr(self, "_watchdog")
             and self._watchdog is not threading.current_thread()
         ):
-            self._watchdog.join(timeout=min(timeout, 0.25))
-        self._process.join(timeout=max(0.0, timeout - 0.5))
+            self._watchdog.join(timeout=remaining(0.20))
+
+        self._process.join(timeout=remaining())
 
         if self._process.is_alive():
             self._process.terminate()
-            self._process.join(timeout=0.5)
+            self._process.join(timeout=0.25)
+
+        if self._process.is_alive() and hasattr(self._process, "kill"):
+            self._process.kill()
+            self._process.join(timeout=0.25)
 
         try:
             self._parent_conn.close()
