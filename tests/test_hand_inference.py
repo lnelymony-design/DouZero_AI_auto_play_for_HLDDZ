@@ -16,6 +16,35 @@ class HandInferenceEngineTests(unittest.TestCase):
         self.assertEqual(result["players"], {})
         self.assertEqual(result["samples"], 0)
 
+    def test_conflicting_bottom_ocr_relaxes_instead_of_collapsing(self):
+        # Reproduces the 2026-10-02 live audit contradiction:
+        # my farmer hand contains 55, the other farmer confirms JJJ55,
+        # while OCR bottom also claims a 5. Those cannot all be distinct
+        # physical copies. The engine must relax OCR bottom constraints rather
+        # than return zero legal worlds.
+        engine = HandInferenceEngine(
+            my_position="landlord_down",
+            my_hand_cards="2AAKJTT9988775543",
+            three_landlord_cards="548",
+            sample_count=400,
+            random_seed=29,
+        )
+        engine.observe("landlord", "44466")
+        engine.observe("landlord_down", "")
+        engine.observe("landlord_up", "JJJ55")
+
+        result = engine.infer()
+        self.assertTrue(result["bottom_constraint_relaxed"])
+        self.assertIn("5", result["bottom_conflicts"])
+        self.assertEqual(result["samples"], 400)
+        self.assertTrue(result["players"])
+        self.assertTrue(
+            engine.posterior_worlds(
+                max_worlds=8,
+                allow_infer=False,
+            )
+        )
+
     def test_revealed_bottom_card_is_forced_to_landlord(self):
         # Farmer perspective: D is a revealed bottom card, so before landlord
         # plays it the landlord must still own the big joker.
