@@ -143,9 +143,13 @@ class WorkerThread(QThread):
         self.stop_requested_event = threading.Event()
         self.current_round_id = None
         self._live_audit_hook = None
-        self.audit_writer = LiveAuditWriter(
-            os.path.join("screenshots", "inference_audits")
+        self.audit_root = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "screenshots",
+            "inference_audits",
         )
+        self.audit_writer = LiveAuditWriter(self.audit_root)
+        print(f"推牌审计目录 >>> {self.audit_writer.root}")
 
         LandlordModel.init_model("baselines/resnet/resnet_landlord.ckpt")
 
@@ -1918,7 +1922,7 @@ class WorkerThread(QThread):
                 return
 
             try:
-                root = os.path.join("screenshots", "inference_audits")
+                root = self.audit_writer.root
                 os.makedirs(root, exist_ok=True)
                 stamp = pending_round_audit["audit_stamp"]
                 index = len(pending_round_audit["screenshots"]) + 1
@@ -1997,8 +2001,8 @@ class WorkerThread(QThread):
                 )
                 if submitted:
                     print(
-                        "推牌审计final已提交 >>> "
-                        f"{os.path.join(root, json_name)} "
+                        "推牌审计final已排队 >>> "
+                        f"{os.path.abspath(os.path.join(root, json_name))} "
                         f"(结算截图 {len(payload['screenshots'])} 张)"
                     )
                 else:
