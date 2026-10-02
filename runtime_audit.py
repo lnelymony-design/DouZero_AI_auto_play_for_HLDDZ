@@ -33,6 +33,7 @@ class LiveAuditWriter:
         self._persisted_seq = {}
         self._submitted_seq = {}
         self._finalized = set()
+        self._finalizing = set()
         self._coalesced = {}
         self._last_error = None
         self._inflight = False
@@ -69,7 +70,10 @@ class LiveAuditWriter:
         event_seq = int(event_seq)
 
         with self._lock:
-            if round_id in self._finalized:
+            if (
+                round_id in self._finalized
+                or round_id in self._finalizing
+            ):
                 return False
 
             previous = self._pending_live.get(round_id)
@@ -95,8 +99,12 @@ class LiveAuditWriter:
         event_seq = int(event_seq)
 
         with self._lock:
-            if round_id in self._finalized:
+            if (
+                round_id in self._finalized
+                or round_id in self._finalizing
+            ):
                 return False
+            self._finalizing.add(round_id)
             self._pending_live.pop(round_id, None)
             self._submitted_seq[round_id] = max(
                 event_seq,
@@ -127,6 +135,7 @@ class LiveAuditWriter:
                 "persisted_seq": self._persisted_seq.get(key, 0),
                 "coalesced": self._coalesced.get(key, 0),
                 "finalized": key in self._finalized,
+                "finalizing": key in self._finalizing,
                 "last_error": self._last_error,
                 "inflight": self._inflight,
             }
@@ -209,6 +218,7 @@ class LiveAuditWriter:
                 int(event_seq),
                 self._persisted_seq.get(round_id, 0),
             )
+            self._finalizing.discard(round_id)
             self._finalized.add(round_id)
             self._last_error = None
 
@@ -240,6 +250,7 @@ class LiveAuditWriter:
                             round_id, event_seq, payload = data
                             if (
                                 round_id not in self._finalized
+                                and round_id not in self._finalizing
                                 and round_id not in self._pending_live
                             ):
                                 self._pending_live[round_id] = (
