@@ -46,6 +46,7 @@ class Config:
     rollout_cpu_threads: int
     rollout_max_job_age_seconds: float
     rollout_shutdown_timeout_seconds: float
+    rollout_result_max_screen_age_seconds: float
     
     def __init__(self, **kwargs) -> None:
         self.window_width = kwargs.get('window_width', 1600)
@@ -92,6 +93,7 @@ class Config:
         self.rollout_cpu_threads = kwargs.get('rollout_cpu_threads', 1)
         self.rollout_max_job_age_seconds = kwargs.get('rollout_max_job_age_seconds', 12.0)
         self.rollout_shutdown_timeout_seconds = kwargs.get('rollout_shutdown_timeout_seconds', 1.5)
+        self.rollout_result_max_screen_age_seconds = kwargs.get('rollout_result_max_screen_age_seconds', 2.0)
     
     @classmethod
     def load(cls):
