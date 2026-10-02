@@ -16,6 +16,7 @@ import multiprocessing
 import threading
 import time
 import traceback
+import uuid
 from typing import Optional
 
 
@@ -47,6 +48,8 @@ class RolloutJob:
 
 @dataclass(frozen=True)
 class RolloutResult:
+    service_epoch: str
+    dispatch_id: str
     session_id: str
     round_id: str
     generation_id: int
@@ -110,9 +113,13 @@ def _rollout_process_main(conn, generation_value, stop_event):
 
             raw_job = message["job"]
             job = RolloutJob(**raw_job)
+            service_epoch = str(message["service_epoch"])
+            dispatch_id = str(message["dispatch_id"])
 
             if int(generation_value.value) != int(job.generation_id):
                 result = RolloutResult(
+                    service_epoch=service_epoch,
+                    dispatch_id=dispatch_id,
                     session_id=job.session_id,
                     round_id=job.round_id,
                     generation_id=job.generation_id,
@@ -161,6 +168,8 @@ def _rollout_process_main(conn, generation_value, stop_event):
 
             status = payload.get("status", "error")
             result = RolloutResult(
+                service_epoch=service_epoch,
+                dispatch_id=dispatch_id,
                 session_id=job.session_id,
                 round_id=job.round_id,
                 generation_id=job.generation_id,
@@ -205,6 +214,8 @@ class RolloutService:
     ):
         self.model_paths = dict(model_paths)
         self.device = str(device)
+        self.service_epoch = uuid.uuid4().hex
+        self._dispatch_seq = 0
         self.cpu_threads = max(1, int(cpu_threads))
         self.shutdown_timeout = max(0.25, float(shutdown_timeout))
 
@@ -219,6 +230,7 @@ class RolloutService:
         self._ready = False
         self._closed = False
         self._running = None
+        self._running_dispatch_id = None
         self._pending = None
         self._results = deque()
         self._superseded_count = 0
@@ -251,15 +263,21 @@ class RolloutService:
 
         with self._lock:
             if self._closed:
-                return False
+                return None
 
             self._generation.value = int(job.generation_id)
+            self._dispatch_seq += 1
+            dispatch_id = (
+                f"{self.service_epoch}:{self._dispatch_seq}"
+            )
 
             if self._pending is not None:
-                old = self._pending
+                old, old_dispatch_id = self._pending
                 self._superseded_count += 1
                 self._append_result_locked(
                     RolloutResult(
+                        service_epoch=self.service_epoch,
+                        dispatch_id=old_dispatch_id,
                         session_id=old.session_id,
                         round_id=old.round_id,
                         generation_id=old.generation_id,
@@ -273,10 +291,10 @@ class RolloutService:
                     )
                 )
 
-            self._pending = job
+            self._pending = (job, dispatch_id)
 
         self._wake.set()
-        return True
+        return dispatch_id
 
     def invalidate(self, generation_id, reason="public_state_changed"):
         with self._lock:
@@ -285,10 +303,12 @@ class RolloutService:
             self._generation.value = int(generation_id)
 
             if self._pending is not None:
-                old = self._pending
+                old, old_dispatch_id = self._pending
                 self._pending = None
                 self._append_result_locked(
                     RolloutResult(
+                        service_epoch=self.service_epoch,
+                        dispatch_id=old_dispatch_id,
                         session_id=old.session_id,
                         round_id=old.round_id,
                         generation_id=old.generation_id,
@@ -319,15 +339,21 @@ class RolloutService:
     def status(self):
         with self._lock:
             return {
+                "service_epoch": self.service_epoch,
                 "ready": self._ready,
                 "closed": self._closed,
                 "running_job_id": (
                     None if self._running is None
                     else self._running.job_id
                 ),
+                "running_dispatch_id": self._running_dispatch_id,
                 "pending_job_id": (
                     None if self._pending is None
-                    else self._pending.job_id
+                    else self._pending[0].job_id
+                ),
+                "pending_dispatch_id": (
+                    None if self._pending is None
+                    else self._pending[1]
                 ),
                 "superseded_count": self._superseded_count,
                 "fatal_error": self._fatal_error,
@@ -344,13 +370,15 @@ class RolloutService:
             ):
                 return None
 
-            job = self._pending
+            job, dispatch_id = self._pending
             self._pending = None
 
             age = time.monotonic() - job.created_monotonic
             if age > job.max_job_age_seconds:
                 self._append_result_locked(
                     RolloutResult(
+                        service_epoch=self.service_epoch,
+                        dispatch_id=dispatch_id,
                         session_id=job.session_id,
                         round_id=job.round_id,
                         generation_id=job.generation_id,
@@ -366,7 +394,8 @@ class RolloutService:
                 return None
 
             self._running = job
-            return job
+            self._running_dispatch_id = dispatch_id
+            return job, dispatch_id
 
     def _handle_message(self, message):
         message_type = message.get("type")
@@ -389,10 +418,13 @@ class RolloutService:
         with self._lock:
             self._append_result_locked(result)
             if (
-                self._running is not None
+                result.service_epoch == self.service_epoch
+                and self._running is not None
                 and self._running.job_id == result.job_id
+                and self._running_dispatch_id == result.dispatch_id
             ):
                 self._running = None
+                self._running_dispatch_id = None
 
     def _bridge_loop(self):
         try:
@@ -418,11 +450,14 @@ class RolloutService:
                 while self._parent_conn.poll(0.0):
                     self._handle_message(self._parent_conn.recv())
 
-                job = self._take_pending_for_dispatch()
-                if job is not None:
+                dispatch = self._take_pending_for_dispatch()
+                if dispatch is not None:
+                    job, dispatch_id = dispatch
                     try:
                         self._parent_conn.send({
                             "type": "job",
+                            "service_epoch": self.service_epoch,
+                            "dispatch_id": dispatch_id,
                             "job": asdict(job),
                         })
                     except Exception as exc:
@@ -431,8 +466,10 @@ class RolloutService:
                             if (
                                 self._running is not None
                                 and self._running.job_id == job.job_id
+                                and self._running_dispatch_id == dispatch_id
                             ):
                                 self._running = None
+                                self._running_dispatch_id = None
 
                 self._wake.wait(0.05)
                 self._wake.clear()
