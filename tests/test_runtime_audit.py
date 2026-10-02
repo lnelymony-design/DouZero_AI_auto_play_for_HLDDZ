@@ -7,6 +7,42 @@ from runtime_audit import LiveAuditWriter
 
 
 class LiveAuditWriterTests(unittest.TestCase):
+    def test_live_updates_are_rejected_after_finalize_is_queued(self):
+        with tempfile.TemporaryDirectory() as root:
+            writer = LiveAuditWriter(root)
+            try:
+                self.assertTrue(
+                    writer.submit_live(
+                        "round-finalizing",
+                        1,
+                        {"event_seq": 1},
+                    )
+                )
+                self.assertTrue(writer.flush(1.0))
+                self.assertTrue(
+                    writer.finalize(
+                        "round-finalizing",
+                        2,
+                        {"event_seq": 2},
+                        "round-finalizing.json",
+                    )
+                )
+                self.assertFalse(
+                    writer.submit_live(
+                        "round-finalizing",
+                        3,
+                        {"event_seq": 3},
+                    )
+                )
+                self.assertTrue(writer.flush(1.0))
+                self.assertFalse(
+                    os.path.exists(
+                        writer.live_path("round-finalizing")
+                    )
+                )
+            finally:
+                writer.close(0.5)
+
     def test_live_revision_and_finalize_are_atomic_and_parseable(self):
         with tempfile.TemporaryDirectory() as root:
             writer = LiveAuditWriter(root)
