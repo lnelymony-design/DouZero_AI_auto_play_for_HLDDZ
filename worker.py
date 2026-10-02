@@ -249,6 +249,7 @@ class WorkerThread(QThread):
         pending_round_audit = None
         audit_event_seq = 0
         suggestion_seq = 0
+        active_suggestion_id = None
         inference_dirty = False
         last_init_diag_signature = None
         last_init_diag_time = 0.0
@@ -499,6 +500,8 @@ class WorkerThread(QThread):
                     stale_reason = "posterior_revision_mismatch"
                 elif record is None:
                     stale_reason = "suggestion_not_found"
+                elif result.suggestion_id != active_suggestion_id:
+                    stale_reason = "suggestion_not_current"
                 elif expected_hash != result.state_hash:
                     stale_reason = "state_hash_mismatch"
                 elif any(count_desync.values()):
@@ -624,6 +627,16 @@ class WorkerThread(QThread):
                 "public": public_snapshot,
                 "candidates": candidates,
                 "posterior_revision": self.rollout_posterior_revision,
+                "model_paths": self.model_path_dict,
+                "rollout_config": {
+                    "device": self.config.rollout_device,
+                    "max_worlds": self.config.rollout_max_worlds,
+                    "min_worlds": self.config.rollout_min_worlds,
+                    "max_steps": self.config.rollout_max_steps,
+                    "time_budget_seconds": (
+                        self.config.rollout_time_budget_seconds
+                    ),
+                },
             }
             state_hash = hashlib.sha256(
                 json.dumps(
@@ -770,6 +783,7 @@ class WorkerThread(QThread):
 
         def emit_douzero_suggestion_if_my_turn():
             nonlocal douzero_paused_reason, suggestion_seq
+            nonlocal active_suggestion_id
             if any(count_desync.values()):
                 pause_douzero("等待对手出牌与剩余张数完成匹配")
                 return
@@ -1087,6 +1101,7 @@ class WorkerThread(QThread):
                     f"{self.current_round_id or 'round'}:"
                     f"{suggestion_seq}"
                 )
+                active_suggestion_id = suggestion_id
                 suggestion_record = {
                     "suggestion_id": suggestion_id,
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1312,9 +1327,13 @@ class WorkerThread(QThread):
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
             nonlocal last_init_diag_signature, last_init_diag_time
             nonlocal self_hand_missing_frames, midgame_wait_announced
+            nonlocal active_suggestion_id
 
             print(f"[ROUND/RESET] {reason}，清理上一局缓存，等待下一局")
-            if self.current_round_id:
+            if (
+                self.current_round_id
+                and pending_round_audit is None
+            ):
                 persist_live_audit(
                     "round_reset",
                     {"reason": str(reason)},
@@ -1349,6 +1368,7 @@ class WorkerThread(QThread):
             douzero_initial_data = None
             douzero_players = None
             douzero_paused_reason = None
+            active_suggestion_id = None
             self.env = None
             self.hand_inference = None
             self.current_round_id = None
@@ -1366,7 +1386,8 @@ class WorkerThread(QThread):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
-            nonlocal audit_event_seq, suggestion_seq, inference_dirty
+            nonlocal audit_event_seq, suggestion_seq
+            nonlocal active_suggestion_id, inference_dirty
 
             self.current_round_id = (
                 datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -1375,6 +1396,7 @@ class WorkerThread(QThread):
             )
             audit_event_seq = 0
             suggestion_seq = 0
+            active_suggestion_id = None
             inference_dirty = False
             self.rollout_accepting_results = True
             bump_generation("round_init")
