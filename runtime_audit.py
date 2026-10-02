@@ -141,6 +141,146 @@ class LiveAuditWriter:
         self._wake.set()
         return True
 
+    def finalize_sync(
+        self,
+        round_id,
+        event_seq,
+        payload,
+        final_name,
+        mirror_path=None,
+        verify_delay=0.5,
+    ):
+        """Synchronously persist and verify a completed round.
+
+        Live revisions stay asynchronous during play. Finalization happens
+        after the round is over, so blocking briefly here is preferable to
+        reporting success before the file is actually durable.
+        """
+        detached = self._json_safe(copy.deepcopy(payload))
+        round_id = str(round_id)
+        event_seq = int(event_seq)
+        final_name = str(final_name)
+
+        with self._lock:
+            if round_id in self._finalized:
+                return {
+                    "ok": True,
+                    "duplicate": True,
+                    "path": self._last_final_path,
+                    "mirror_path": None,
+                }
+            if round_id in self._finalizing:
+                return {
+                    "ok": False,
+                    "error": "round is already finalizing asynchronously",
+                    "path": None,
+                    "mirror_path": None,
+                }
+            self._finalizing.add(round_id)
+            self._pending_live.pop(round_id, None)
+            self._submitted_seq[round_id] = max(
+                event_seq,
+                self._submitted_seq.get(round_id, 0),
+            )
+
+        final_path = os.path.abspath(
+            os.path.join(self.root, final_name)
+        )
+        mirror_abs = (
+            None
+            if mirror_path is None
+            else os.path.abspath(str(mirror_path))
+        )
+
+        try:
+            detached["persisted_seq"] = event_seq
+            detached["audit_writer"] = {
+                "coalesced_revisions": self._coalesced.get(
+                    round_id, 0
+                ),
+                "atomic_replace": True,
+                "finalized": True,
+                "synchronous_final": True,
+            }
+
+            self._atomic_write_json(final_path, detached)
+
+            if mirror_abs is not None:
+                os.makedirs(
+                    os.path.dirname(mirror_abs),
+                    exist_ok=True,
+                )
+                self._atomic_write_json(mirror_abs, detached)
+
+            # Re-open both files to prove they are parseable, not merely that
+            # os.replace returned without raising.
+            with open(final_path, "r", encoding="utf-8") as fp:
+                json.load(fp)
+            if mirror_abs is not None:
+                with open(mirror_abs, "r", encoding="utf-8") as fp:
+                    json.load(fp)
+
+            if verify_delay and verify_delay > 0:
+                time.sleep(float(verify_delay))
+
+            if not os.path.isfile(final_path):
+                raise FileNotFoundError(
+                    "final audit disappeared after write: "
+                    + final_path
+                )
+            if mirror_abs is not None and not os.path.isfile(
+                mirror_abs
+            ):
+                raise FileNotFoundError(
+                    "mirror audit disappeared after write: "
+                    + mirror_abs
+                )
+
+            final_size = os.path.getsize(final_path)
+            mirror_size = (
+                None
+                if mirror_abs is None
+                else os.path.getsize(mirror_abs)
+            )
+
+            live_path = self.live_path(round_id)
+            try:
+                if os.path.exists(live_path):
+                    os.remove(live_path)
+            except OSError:
+                pass
+
+            with self._lock:
+                self._persisted_seq[round_id] = max(
+                    event_seq,
+                    self._persisted_seq.get(round_id, 0),
+                )
+                self._finalizing.discard(round_id)
+                self._finalized.add(round_id)
+                self._last_error = None
+                self._last_reported_error = None
+                self._last_final_path = final_path
+
+            return {
+                "ok": True,
+                "duplicate": False,
+                "path": final_path,
+                "size": final_size,
+                "mirror_path": mirror_abs,
+                "mirror_size": mirror_size,
+            }
+        except Exception as exc:
+            with self._lock:
+                self._finalizing.discard(round_id)
+                self._last_error = repr(exc)
+                self._last_reported_error = repr(exc)
+            return {
+                "ok": False,
+                "error": repr(exc),
+                "path": final_path,
+                "mirror_path": mirror_abs,
+            }
+
     def is_persisted(self, round_id, min_seq=1):
         with self._lock:
             return self._persisted_seq.get(str(round_id), 0) >= int(min_seq)
