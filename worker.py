@@ -687,7 +687,7 @@ class WorkerThread(QThread):
             self.ai_suggestion_signal.emit([("__PAUSED__", "-", "-")])
 
         def emit_douzero_suggestion_if_my_turn():
-            nonlocal douzero_paused_reason
+            nonlocal douzero_paused_reason, suggestion_seq
             if any(count_desync.values()):
                 pause_douzero("等待对手出牌与剩余张数完成匹配")
                 return
@@ -720,58 +720,6 @@ class WorkerThread(QThread):
                     for rank, (action, _) in enumerate(raw_actions, start=1)
                 }
                 raw_top_action, raw_top_score = raw_actions[0]
-
-                rollout_result = None
-                rollout_key = (
-                    tuple(douzero_history),
-                    tuple(action for action, _ in raw_actions[:3]),
-                    round(ess_ratio, 4),
-                )
-                if (
-                    self.rollout_evaluator is not None
-                    and self.hand_inference is not None
-                    and ess_ratio >= self.config.rollout_min_ess_ratio
-                ):
-                    if self.last_rollout_key == rollout_key:
-                        rollout_result = self.last_rollout_result
-                    else:
-                        try:
-                            rollout_result = self.rollout_evaluator.evaluate(
-                                public_env=self.env,
-                                hand_inference=self.hand_inference,
-                                candidates=[
-                                    action for action, _ in raw_actions[:3]
-                                ],
-                                my_position=self.my_position,
-                            )
-                            self.last_rollout_key = rollout_key
-                            self.last_rollout_result = rollout_result
-                        except Exception as rollout_exc:
-                            print(f"后验Rollout计算失败: {rollout_exc}")
-                            rollout_result = None
-
-                if rollout_result:
-                    parts = []
-                    for item in rollout_result.get("candidates", []):
-                        action = item["action"]
-                        shown_action = (
-                            "不出"
-                            if action == "Pass"
-                            else display_cards(action)
-                        )
-                        parts.append(
-                            f"{shown_action}:整局值"
-                            f"{item['rollout_value']:.0%}/"
-                            f"终局{item['terminal_ratio']:.0%}/"
-                            f"控权{item['control_share']:.0%}"
-                        )
-                    if parts:
-                        print(
-                            "走向评估 >>> "
-                            + " | ".join(parts)
-                            + f" [世界{rollout_result['worlds_completed']}，"
-                            f"{rollout_result['elapsed_seconds']:.2f}s]"
-                        )
 
                 # game_new may deliberately replace the raw network top action
                 # with a deterministic direct-finish / finish-path action.  The
@@ -954,39 +902,6 @@ class WorkerThread(QThread):
                     decision.action if decision is not None
                     else raw_top_action
                 )
-                rollout_override = False
-                rollout_gain = None
-                if (
-                    rollout_result
-                    and not self.config.rollout_shadow_mode
-                    and (
-                        decision is None
-                        or decision.source != "env_override"
-                    )
-                ):
-                    rollout_items = {
-                        item["action"]: item
-                        for item in rollout_result.get("candidates", [])
-                    }
-                    best_rollout = (
-                        rollout_result.get("candidates", [None])[0]
-                        if rollout_result.get("candidates")
-                        else None
-                    )
-                    raw_rollout = rollout_items.get(raw_top_action)
-                    if best_rollout is not None and raw_rollout is not None:
-                        rollout_gain = (
-                            best_rollout["rollout_value"]
-                            - raw_rollout["rollout_value"]
-                        )
-                        if (
-                            best_rollout["action"] != raw_top_action
-                            and rollout_gain
-                            >= self.config.rollout_min_value_gain
-                            and best_rollout["terminal_ratio"] >= 0.80
-                        ):
-                            final_action = best_rollout["action"]
-                            rollout_override = True
 
                 # Ensure the final action is present in the display set.
                 if final_action not in enriched_by_action:
@@ -1057,12 +972,9 @@ class WorkerThread(QThread):
                     source_text = {
                         "env_override": "直接出完/路径",
                         "belief_safer": "推牌风险修正",
-                        "rollout": "后验整局模拟",
                         "douzero": "DouZero",
                     }.get(
-                        "rollout"
-                        if rollout_override
-                        else (
+                        (
                             decision.source
                             if decision is not None
                             else "douzero"
@@ -1088,8 +1000,16 @@ class WorkerThread(QThread):
                         )
 
                 raw_profile = profile_by_action.get(raw_top_action)
-                suggestion_audit.append({
+                suggestion_seq += 1
+                suggestion_id = (
+                    f"{self.current_round_id or 'round'}:"
+                    f"{suggestion_seq}"
+                )
+                suggestion_record = {
+                    "suggestion_id": suggestion_id,
                     "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "generation_id": self.rollout_generation,
+                    "posterior_revision": self.rollout_posterior_revision,
                     "history_length": len(douzero_history),
                     "ess_ratio": ess_ratio,
                     "risk_adjustment_enabled": bool(
@@ -1100,26 +1020,17 @@ class WorkerThread(QThread):
                         and decision.source == "belief_safer"
                     ),
                     "decision_source": (
-                        "rollout"
-                        if rollout_override
-                        else (
-                            decision.source
-                            if decision is not None
-                            else "douzero"
-                        )
+                        decision.source
+                        if decision is not None
+                        else "douzero"
                     ),
                     "decision_reason": (
-                        (
-                            f"后验整局值提升 {rollout_gain:.3f}"
-                            if rollout_override and rollout_gain is not None
-                            else (
-                                decision.reason
-                                if decision is not None
-                                else ""
-                            )
-                        )
+                        decision.reason
+                        if decision is not None
+                        else ""
                     ),
-                    "rollout": rollout_result,
+                    "rollout": None,
+                    "rollout_status": "not_submitted",
                     "rollout_shadow_mode": bool(
                         self.config.rollout_shadow_mode
                     ),
@@ -1159,7 +1070,27 @@ class WorkerThread(QThread):
                         audit_candidates,
                         key=lambda item: item["model_rank"],
                     ),
-                })
+                }
+                suggestion_audit.append(suggestion_record)
+
+                # HUD is already updated above. Rollout is only queued now,
+                # so recognition never waits for posterior simulation.
+                schedule_rollout(
+                    suggestion_record,
+                    final_action,
+                    raw_actions,
+                    ess_ratio,
+                )
+                persist_live_audit(
+                    "suggestion",
+                    {
+                        "suggestion_id": suggestion_id,
+                        "action": final_action,
+                        "rollout_status": suggestion_record.get(
+                            "rollout_status"
+                        ),
+                    },
+                )
             except Exception as exc:
                 pause_douzero(f"建议计算失败：{exc}")
 
