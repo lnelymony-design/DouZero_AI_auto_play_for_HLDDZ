@@ -129,11 +129,25 @@ class ExactWorldEnv(GameEnv):
         return cls.from_public_snapshot(snapshot, exact_hands)
 
     def apply_exact_action(self, action):
-        """Apply one legal action without invoking a policy model."""
+        """Apply one legal action without invoking a policy model.
+
+        Validate both rule legality and physical card ownership before mutating
+        any environment state. A malformed candidate must leave the simulation
+        snapshot unchanged.
+        """
         action = sorted(list(action))
         position = self.acting_player_position
         legal = self.game_infoset.legal_actions
         if action not in legal:
+            return False
+
+        hand = self.info_sets[position].player_hand_cards
+        hand_counter = Counter(hand)
+        action_counter = Counter(action)
+        if any(
+            action_counter[card] > hand_counter[card]
+            for card in action_counter
+        ):
             return False
 
         if action:
@@ -144,10 +158,7 @@ class ExactWorldEnv(GameEnv):
         self.last_move_dict[position] = action.copy()
         self.card_play_action_seq.append((position, action.copy()))
 
-        hand = self.info_sets[position].player_hand_cards
         for card in action:
-            if card not in hand:
-                return False
             hand.remove(card)
         hand.sort()
 
