@@ -592,7 +592,7 @@ class WorkerThread(QThread):
                 record["rollout_error"] = result.error
 
                 candidates = payload.get("candidates", [])
-                if candidates:
+                if candidates and result.status in ("ok", "partial"):
                     parts = []
                     for item in candidates:
                         action = item.get("action")
@@ -624,8 +624,9 @@ class WorkerThread(QThread):
                         "expired",
                         "superseded",
                         "deadline",
-                        "insufficient_worlds",
                     )
+                    else "rollout_insufficient"
+                    if result.status == "insufficient_worlds"
                     else "rollout_failed"
                 )
                 persist_live_audit(
