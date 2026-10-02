@@ -35,6 +35,7 @@ class LiveAuditWriter:
         self._finalized = set()
         self._coalesced = {}
         self._last_error = None
+        self._inflight = False
         self._thread.start()
 
     @staticmethod
@@ -112,6 +113,7 @@ class LiveAuditWriter:
                     "last_error": self._last_error,
                     "pending_live": len(self._pending_live),
                     "pending_final": len(self._pending_final),
+                    "inflight": self._inflight,
                 }
             key = str(round_id)
             return {
@@ -120,6 +122,7 @@ class LiveAuditWriter:
                 "coalesced": self._coalesced.get(key, 0),
                 "finalized": key in self._finalized,
                 "last_error": self._last_error,
+                "inflight": self._inflight,
             }
 
     def flush(self, timeout=0.75):
@@ -127,7 +130,9 @@ class LiveAuditWriter:
         while time.monotonic() < deadline:
             with self._lock:
                 pending = bool(
-                    self._pending_live or self._pending_final
+                    self._pending_live
+                    or self._pending_final
+                    or self._inflight
                 )
             if not pending:
                 return True
@@ -212,6 +217,9 @@ class LiveAuditWriter:
                 continue
 
             kind, data = request
+            with self._lock:
+                self._inflight = True
+
             try:
                 if kind == "live":
                     self._persist_live(*data)
@@ -220,5 +228,23 @@ class LiveAuditWriter:
             except Exception as exc:
                 with self._lock:
                     self._last_error = repr(exc)
-                # Preserve the previous valid file. A future revision may retry.
-                time.sleep(0.05)
+
+                    if not self._stop.is_set():
+                        if kind == "live":
+                            round_id, event_seq, payload = data
+                            if (
+                                round_id not in self._finalized
+                                and round_id not in self._pending_live
+                            ):
+                                self._pending_live[round_id] = (
+                                    event_seq,
+                                    payload,
+                                )
+                        else:
+                            self._pending_final.appendleft(data)
+                # Preserve the previous valid file and retry without spinning.
+                time.sleep(0.10)
+            finally:
+                with self._lock:
+                    self._inflight = False
+                self._wake.set()
