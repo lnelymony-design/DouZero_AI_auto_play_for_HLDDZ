@@ -249,6 +249,7 @@ class WorkerThread(QThread):
         pending_round_audit = None
         audit_event_seq = 0
         suggestion_seq = 0
+        inference_dirty = False
         last_init_diag_signature = None
         last_init_diag_time = 0.0
         scene_blank_frames = 0
@@ -649,6 +650,28 @@ class WorkerThread(QThread):
 
         self._live_audit_hook = persist_live_audit
 
+        def observe_hand_inference_action(player, cards):
+            nonlocal inference_dirty
+            if self.hand_inference is None:
+                return False
+            try:
+                self.hand_inference.observe(player, cards)
+                inference_dirty = True
+                return True
+            except Exception as exc:
+                print(
+                    "推牌器记录动作失败: "
+                    f"player={player}, cards={cards}, error={exc}"
+                )
+                return False
+
+        def flush_frame_inference():
+            nonlocal inference_dirty
+            if not inference_dirty:
+                return
+            inference_dirty = False
+            self.refresh_hand_inference()
+
         def emit_remaining_counts():
             result = {}
             for side in ("left", "right"):
@@ -675,7 +698,7 @@ class WorkerThread(QThread):
             print(f"微信牌局 >>> {label}：不出{suffix}")
             bump_generation(f"public_pass:{player}")
             self.played_card_signal.emit([player, "Pass"])
-            self.record_hand_inference_action(player, "")
+            observe_hand_inference_action(player, "")
             apply_action_to_douzero(player, "")
             expected_side = side_cycle[side]
             persist_live_audit(
@@ -1151,10 +1174,7 @@ class WorkerThread(QThread):
 
         def apply_action_to_douzero(player, cards):
             douzero_history.append((player, cards))
-            if not rebuild_douzero_from_history():
-                return False
-            emit_douzero_suggestion_if_my_turn()
-            return True
+            return rebuild_douzero_from_history()
 
         def queue_round_audit(reason):
             nonlocal pending_round_audit
@@ -1301,7 +1321,7 @@ class WorkerThread(QThread):
             nonlocal round_initialized, round_signature, expected_side
             nonlocal confirmed_my_hand, wechat_other_hands_cards_str
             nonlocal douzero_initial_data, douzero_players, douzero_paused_reason
-            nonlocal audit_event_seq, suggestion_seq
+            nonlocal audit_event_seq, suggestion_seq, inference_dirty
 
             self.current_round_id = (
                 datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -1310,6 +1330,7 @@ class WorkerThread(QThread):
             )
             audit_event_seq = 0
             suggestion_seq = 0
+            inference_dirty = False
             self.rollout_accepting_results = True
             bump_generation("round_init")
 
@@ -1421,7 +1442,6 @@ class WorkerThread(QThread):
                 },
             )
             self.refresh_hand_inference()
-            emit_douzero_suggestion_if_my_turn()
 
         def pending_self_change(raw_hand):
             if not round_initialized or not confirmed_my_hand or not raw_hand:
@@ -1477,6 +1497,7 @@ class WorkerThread(QThread):
                 screenshot_saved = True
 
             try:
+                frame_generation_start = self.rollout_generation
                 now = time.monotonic()
                 raw_hand = recognizer.recognize_my_hand(screenshot)
                 init_hand = stable_value("init_hand", raw_hand, frames=5)
@@ -1998,8 +2019,14 @@ class WorkerThread(QThread):
                             f"public_action:{self.my_position}:{payload}"
                         )
                         self.played_card_signal.emit([self.my_position, payload])
-                        self.record_hand_inference_action(self.my_position, payload)
-                        apply_action_to_douzero(self.my_position, payload)
+                        observe_hand_inference_action(
+                            self.my_position,
+                            payload,
+                        )
+                        apply_action_to_douzero(
+                            self.my_position,
+                            payload,
+                        )
                         persist_live_audit(
                             "action",
                             {
@@ -2057,7 +2084,7 @@ class WorkerThread(QThread):
                         bump_generation(
                             f"public_action:{player}:{cards}"
                         )
-                        self.record_hand_inference_action(player, cards)
+                        observe_hand_inference_action(player, cards)
                         apply_action_to_douzero(player, cards)
                         persist_live_audit(
                             "action",
@@ -2137,6 +2164,13 @@ class WorkerThread(QThread):
                                 record_pass(side, inferred=False)
                             else:
                                 break
+
+                # Commit the frame as one coherent public state. Several
+                # inferred Pass/actions in one screenshot produce one posterior
+                # refresh and one suggestion/rollout job for the final state.
+                flush_frame_inference()
+                if self.rollout_generation != frame_generation_start:
+                    emit_douzero_suggestion_if_my_turn()
 
             except Exception as exc:
                 print(f"微信牌局接入异常（不会退出线程）: {exc}")
