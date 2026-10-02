@@ -9,6 +9,7 @@ coalesced away.
 import copy
 from collections import deque
 import json
+import math
 import os
 import threading
 import time
@@ -16,7 +17,7 @@ import time
 
 class LiveAuditWriter:
     def __init__(self, root):
-        self.root = root
+        self.root = os.path.abspath(root)
         os.makedirs(self.root, exist_ok=True)
 
         self._lock = threading.Lock()
@@ -38,6 +39,28 @@ class LiveAuditWriter:
         self._last_error = None
         self._inflight = False
         self._thread.start()
+
+    @staticmethod
+    def _json_safe(value):
+        """Return a JSON-safe detached structure.
+
+        Audit durability is more important than preserving a non-finite model
+        diagnostic. NaN/Infinity are normalized to null instead of making the
+        writer retry forever under allow_nan=False.
+        """
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {
+                str(key): LiveAuditWriter._json_safe(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [
+                LiveAuditWriter._json_safe(item)
+                for item in value
+            ]
+        return value
 
     @staticmethod
     def _safe_round_id(round_id):
@@ -65,7 +88,7 @@ class LiveAuditWriter:
         os.replace(tmp, path)
 
     def submit_live(self, round_id, event_seq, payload):
-        detached = copy.deepcopy(payload)
+        detached = self._json_safe(copy.deepcopy(payload))
         round_id = str(round_id)
         event_seq = int(event_seq)
 
@@ -94,7 +117,7 @@ class LiveAuditWriter:
         return True
 
     def finalize(self, round_id, event_seq, payload, final_name):
-        detached = copy.deepcopy(payload)
+        detached = self._json_safe(copy.deepcopy(payload))
         round_id = str(round_id)
         event_seq = int(event_seq)
 
@@ -119,6 +142,40 @@ class LiveAuditWriter:
     def is_persisted(self, round_id, min_seq=1):
         with self._lock:
             return self._persisted_seq.get(str(round_id), 0) >= int(min_seq)
+
+    def wait_persisted(self, round_id, min_seq=1, timeout=2.0):
+        """Wait until a submitted revision is durably replaced on disk."""
+        round_id = str(round_id)
+        min_seq = int(min_seq)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            with self._lock:
+                persisted = self._persisted_seq.get(round_id, 0)
+                error = self._last_error
+                inflight = self._inflight
+                pending_final = len(self._pending_final)
+                pending_live = len(self._pending_live)
+            if persisted >= min_seq:
+                return {
+                    "ok": True,
+                    "persisted_seq": persisted,
+                    "last_error": error,
+                    "inflight": inflight,
+                    "pending_final": pending_final,
+                    "pending_live": pending_live,
+                }
+            self._wake.set()
+            time.sleep(0.02)
+
+        with self._lock:
+            return {
+                "ok": self._persisted_seq.get(round_id, 0) >= min_seq,
+                "persisted_seq": self._persisted_seq.get(round_id, 0),
+                "last_error": self._last_error,
+                "inflight": self._inflight,
+                "pending_final": len(self._pending_final),
+                "pending_live": len(self._pending_live),
+            }
 
     def status(self, round_id=None):
         with self._lock:
