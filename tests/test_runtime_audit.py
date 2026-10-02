@@ -45,6 +45,56 @@ class LiveAuditWriterTests(unittest.TestCase):
             finally:
                 writer.close(0.5)
 
+    def test_finalize_sync_writes_primary_and_mirror_and_reopens(self):
+        with tempfile.TemporaryDirectory() as root:
+            writer = LiveAuditWriter(
+                os.path.join(root, "primary")
+            )
+            try:
+                mirror = os.path.join(
+                    root,
+                    "mirror",
+                    "round-sync.json",
+                )
+                result = writer.finalize_sync(
+                    "round-sync",
+                    7,
+                    {
+                        "event_seq": 7,
+                        "value": "ok",
+                        "nan_value": float("nan"),
+                    },
+                    "round-sync.json",
+                    mirror_path=mirror,
+                    verify_delay=0,
+                )
+                self.assertTrue(result["ok"])
+                self.assertTrue(os.path.exists(result["path"]))
+                self.assertTrue(
+                    os.path.exists(result["mirror_path"])
+                )
+                self.assertGreater(result["size"], 0)
+                self.assertGreater(result["mirror_size"], 0)
+
+                with open(
+                    result["path"],
+                    "r",
+                    encoding="utf-8",
+                ) as fp:
+                    primary = json.load(fp)
+                with open(
+                    result["mirror_path"],
+                    "r",
+                    encoding="utf-8",
+                ) as fp:
+                    mirrored = json.load(fp)
+
+                self.assertEqual(primary["value"], "ok")
+                self.assertEqual(mirrored["value"], "ok")
+                self.assertIsNone(primary["nan_value"])
+            finally:
+                writer.close(0.5)
+
     def test_live_updates_are_rejected_after_finalize_is_queued(self):
         with tempfile.TemporaryDirectory() as root:
             writer = LiveAuditWriter(root)
