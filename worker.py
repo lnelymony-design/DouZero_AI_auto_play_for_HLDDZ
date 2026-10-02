@@ -30,6 +30,7 @@ from utils import remove_chars_from_string
 from inference import HandInferenceEngine
 from inference.decision_policy import choose_recommendation
 from inference.inference_service import InferenceJob, InferenceService
+from inference.play_evidence import OpponentPlayEvidence
 from inference.rollout import snapshot_public_env
 from inference.rollout_service import RolloutJob, RolloutService
 from runtime_audit import LiveAuditWriter
@@ -252,6 +253,9 @@ class WorkerThread(QThread):
             "left": {"cards": "", "time": 0.0},
             "right": {"cards": "", "time": 0.0},
         }
+        opponent_play_evidence = OpponentPlayEvidence(
+            max_age_seconds=6.0
+        )
         recent_self_plays = []
         count_missing_frames = {"left": 0, "right": 0}
         self_hand_missing_frames = 0
@@ -1997,6 +2001,7 @@ class WorkerThread(QThread):
             self_hand_missing_frames = 0
             for side in recent_play:
                 recent_play[side] = {"cards": "", "time": 0.0}
+            opponent_play_evidence.clear()
             recent_self_plays.clear()
             for side in pass_latched:
                 pass_latched[side] = False
@@ -2138,6 +2143,7 @@ class WorkerThread(QThread):
                 pass_latched[side] = False
             for side in recent_play:
                 recent_play[side] = {"cards": "", "time": 0.0}
+            opponent_play_evidence.clear()
             recent_self_plays.clear()
 
             print()
@@ -2163,20 +2169,39 @@ class WorkerThread(QThread):
             removed = hand_difference(confirmed_my_hand, raw_hand)
             return removed is not None and len(removed) > 0
 
-        def can_infer_pass(side, live_counts, raw_hand):
+        def can_infer_pass(
+            side,
+            live_counts,
+            raw_counts,
+            raw_hand,
+        ):
             if side == "me":
                 return not pending_self_change(raw_hand)
-            count = live_counts.get(side)
             tracked = tracked_remaining.get(side)
-            if count is not None and tracked is not None and count < tracked:
+            for count in (
+                raw_counts.get(side),
+                live_counts.get(side),
+            ):
+                if (
+                    count is not None
+                    and tracked is not None
+                    and count < tracked
+                ):
+                    return False
+            if count_desync.get(side):
                 return False
             return True
 
-        def sync_to_actor(actor, live_counts, raw_hand):
+        def sync_to_actor(actor, live_counts, raw_counts, raw_hand):
             nonlocal expected_side
             guard = 0
             while expected_side is not None and expected_side != actor and guard < 3:
-                if not can_infer_pass(expected_side, live_counts, raw_hand):
+                if not can_infer_pass(
+                    expected_side,
+                    live_counts,
+                    raw_counts,
+                    raw_hand,
+                ):
                     return False
                 if not record_pass(expected_side, inferred=True):
                     return False
@@ -2587,11 +2612,77 @@ class WorkerThread(QThread):
                     "me": recognizer.recognize_my_played(screenshot),
                 }
                 for side in ("left", "right"):
+                    raw_cards = played_values[side]
+                    if raw_cards and is_legal_play(raw_cards):
+                        opponent_play_evidence.observe(
+                            side,
+                            raw_cards,
+                            now,
+                            source="single_frame",
+                        )
+
                     cards = stable_value(
-                        f"{side}_play_candidate", played_values[side], frames=2
+                        f"{side}_play_candidate",
+                        raw_cards,
+                        frames=2,
                     )
-                    if cards:
-                        recent_play[side] = {"cards": cards, "time": now}
+                    if cards and is_legal_play(cards):
+                        recent_play[side] = {
+                            "cards": cards,
+                            "time": now,
+                        }
+                        opponent_play_evidence.observe(
+                            side,
+                            cards,
+                            now,
+                            source="stable_visual",
+                        )
+
+                    # The count badge often changes while the long-card
+                    # animation is still visible, several frames before the
+                    # count becomes stable enough to commit. Use that first
+                    # raw drop to make an exact-count rescan and preserve the
+                    # transient play for later confirmation.
+                    raw_count = raw_counts.get(side)
+                    old_count = tracked_remaining.get(side)
+                    if (
+                        raw_count is not None
+                        and old_count is not None
+                        and 0 <= raw_count < old_count
+                    ):
+                        raw_drop = old_count - raw_count
+                        cached = opponent_play_evidence.best(
+                            side,
+                            raw_drop,
+                            now,
+                            max_age_seconds=1.5,
+                        )
+                        if cached is None:
+                            targeted = (
+                                recognizer.recognize_left_played(
+                                    screenshot,
+                                    expected_count=raw_drop,
+                                )
+                                if side == "left"
+                                else recognizer.recognize_right_played(
+                                    screenshot,
+                                    expected_count=raw_drop,
+                                )
+                            )
+                            if (
+                                targeted
+                                and len(targeted) == raw_drop
+                                and is_legal_play(targeted)
+                            ):
+                                opponent_play_evidence.observe(
+                                    side,
+                                    targeted,
+                                    now,
+                                    source="count_trigger",
+                                    expected_drop=raw_drop,
+                                )
+
+                opponent_play_evidence.prune(now)
 
                 self_visual = stable_value(
                     "me_play_candidate", played_values.get("me", ""), frames=2
@@ -2728,9 +2819,34 @@ class WorkerThread(QThread):
                     else:
                         return None
 
-                    info = recent_play[side]
-                    cards = info["cards"] if now - info["time"] <= 3.0 else ""
-                    if not cards or len(cards) != drop:
+                    evidence_item = opponent_play_evidence.best(
+                        side,
+                        drop,
+                        now,
+                        max_age_seconds=5.5,
+                    )
+                    cards = (
+                        ""
+                        if evidence_item is None
+                        else evidence_item["cards"]
+                    )
+                    evidence_source = (
+                        None
+                        if evidence_item is None
+                        else evidence_item.get("source")
+                    )
+
+                    if not cards:
+                        info = recent_play[side]
+                        cards = (
+                            info["cards"]
+                            if now - info["time"] <= 3.0
+                            else ""
+                        )
+                        if cards and len(cards) != drop:
+                            cards = ""
+
+                    if not cards:
                         if side == "left":
                             cards = recognizer.recognize_left_played(
                                 screenshot, expected_count=drop
@@ -2739,8 +2855,36 @@ class WorkerThread(QThread):
                             cards = recognizer.recognize_right_played(
                                 screenshot, expected_count=drop
                             )
+                        if (
+                            cards
+                            and len(cards) == drop
+                            and is_legal_play(cards)
+                        ):
+                            evidence_item = opponent_play_evidence.observe(
+                                side,
+                                cards,
+                                now,
+                                source="count_trigger",
+                                expected_drop=drop,
+                            )
+                            evidence_source = "count_trigger"
 
                     if cards and len(cards) == drop and is_legal_play(cards):
+                        if evidence_item is not None:
+                            age_ms = int(
+                                1000.0
+                                * float(
+                                    evidence_item.get(
+                                        "age_seconds", 0.0
+                                    )
+                                )
+                            )
+                            source = (
+                                f"{source}+视觉缓存:"
+                                f"{evidence_source}"
+                                f"/hits={evidence_item.get('hits', 1)}"
+                                f"/age={age_ms}ms"
+                            )
                         return (cards, target_count, source)
                     if cards and len(cards) == drop and not is_legal_play(cards):
                         print(
@@ -2777,7 +2921,12 @@ class WorkerThread(QThread):
 
                     if actor is None:
                         break
-                    if not sync_to_actor(actor, live_counts, raw_hand):
+                    if not sync_to_actor(
+                        actor,
+                        live_counts,
+                        raw_counts,
+                        raw_hand,
+                    ):
                         break
 
                     if actor == "me":
@@ -2853,6 +3002,7 @@ class WorkerThread(QThread):
                             "matched_confirmed_action",
                         )
                         recent_play[actor] = {"cards": "", "time": 0.0}
+                        opponent_play_evidence.clear(actor)
                         emit_remaining_counts()
                         bump_generation(
                             f"public_action:{player}:{cards}"
@@ -2954,6 +3104,30 @@ class WorkerThread(QThread):
                                 and not pass_latched[expected_side]
                             ):
                                 side = expected_side
+                                if side != "me":
+                                    tracked = tracked_remaining.get(side)
+                                    raw_count = raw_counts.get(side)
+                                    stable_count = live_counts.get(side)
+                                    unresolved_drop = (
+                                        bool(count_desync.get(side))
+                                        or (
+                                            tracked is not None
+                                            and raw_count is not None
+                                            and raw_count < tracked
+                                        )
+                                        or (
+                                            tracked is not None
+                                            and stable_count is not None
+                                            and stable_count < tracked
+                                        )
+                                    )
+                                    if unresolved_drop:
+                                        # The text may belong to a later/stale
+                                        # trick while an earlier count drop is
+                                        # still unresolved. Never convert it
+                                        # into a public Pass.
+                                        pass_latched[side] = True
+                                        break
                                 pass_latched[side] = True
                                 record_pass(side, inferred=False)
                             else:
