@@ -247,6 +247,8 @@ class WorkerThread(QThread):
         douzero_paused_reason = None
         suggestion_audit = []
         pending_round_audit = None
+        audit_event_seq = 0
+        suggestion_seq = 0
         last_init_diag_signature = None
         last_init_diag_time = 0.0
         scene_blank_frames = 0
@@ -305,6 +307,347 @@ class WorkerThread(QThread):
             if side == "left":
                 return PlayerPosition[(self.my_position_code + 2) % 3]
             return None
+
+        def build_live_audit_payload(event_type, extra=None):
+            history = []
+            if self.hand_inference is not None:
+                history = [
+                    {
+                        "player": player,
+                        "action": cards if cards else "Pass",
+                    }
+                    for player, cards in self.hand_inference.history
+                ]
+            elif douzero_history:
+                history = [
+                    {
+                        "player": player,
+                        "action": cards if cards else "Pass",
+                    }
+                    for player, cards in douzero_history
+                ]
+
+            payload = {
+                "format": "wechat_live_audit_v5",
+                "session_id": self.session_id,
+                "round_id": self.current_round_id,
+                "event_type": str(event_type),
+                "event_seq": audit_event_seq,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "generation_id": self.rollout_generation,
+                "posterior_revision": self.rollout_posterior_revision,
+                "my_position": self.my_position,
+                "initial_my_hand": (
+                    ""
+                    if self.hand_inference is None
+                    else "".join(self.hand_inference.initial_my_hand)
+                ),
+                "three_landlord_cards": (
+                    ""
+                    if self.hand_inference is None
+                    else "".join(
+                        self.hand_inference.three_landlord_cards
+                    )
+                ),
+                "public_history": history,
+                "tracked_remaining": dict(tracked_remaining),
+                "observed_remaining": dict(observed_remaining),
+                "count_desync": dict(count_desync),
+                "inference": self.last_hand_inference_result,
+                "douzero_history": [
+                    {
+                        "player": player,
+                        "action": cards if cards else "Pass",
+                    }
+                    for player, cards in douzero_history
+                ],
+                "suggestion_audit": list(suggestion_audit),
+                "posterior_control": {
+                    "residual_behavior_strength": (
+                        self.config.inference_residual_behavior_strength
+                    ),
+                    "residual_behavior_temperature": (
+                        self.config.inference_residual_behavior_temperature
+                    ),
+                    "rollout_enabled": bool(self.config.rollout_enabled),
+                    "rollout_shadow_mode": bool(
+                        self.config.rollout_shadow_mode
+                    ),
+                    "rollout_device": self.config.rollout_device,
+                    "rollout_max_worlds": self.config.rollout_max_worlds,
+                    "rollout_min_worlds": self.config.rollout_min_worlds,
+                    "rollout_time_budget_seconds": (
+                        self.config.rollout_time_budget_seconds
+                    ),
+                },
+                "rollout_service": (
+                    None
+                    if self.rollout_service is None
+                    else self.rollout_service.status()
+                ),
+            }
+            if extra:
+                payload["event_detail"] = dict(extra)
+            return payload
+
+        def persist_live_audit(event_type, extra=None):
+            nonlocal audit_event_seq
+            if not self.current_round_id:
+                return False
+            audit_event_seq += 1
+            payload = build_live_audit_payload(event_type, extra)
+            payload["event_seq"] = audit_event_seq
+            return self.audit_writer.submit_live(
+                self.current_round_id,
+                audit_event_seq,
+                payload,
+            )
+
+        def bump_generation(reason):
+            self.rollout_generation += 1
+            if self.rollout_service is not None:
+                self.rollout_service.invalidate(
+                    self.rollout_generation,
+                    reason=reason,
+                )
+
+        def set_desync(side, value, reason):
+            value = bool(value)
+            old = bool(count_desync.get(side))
+            count_desync[side] = value
+            if old == value:
+                return
+            bump_generation(
+                f"desync_{'enter' if value else 'exit'}:{side}:{reason}"
+            )
+            persist_live_audit(
+                "desync_enter" if value else "desync_exit",
+                {
+                    "side": side,
+                    "reason": reason,
+                    "value": value,
+                },
+            )
+
+        def drain_rollout_results():
+            if self.rollout_service is None:
+                return
+            for result in self.rollout_service.drain_results(8):
+                record = next(
+                    (
+                        item
+                        for item in reversed(suggestion_audit)
+                        if item.get("suggestion_id")
+                        == result.suggestion_id
+                    ),
+                    None,
+                )
+
+                expected_hash = (
+                    None if record is None
+                    else record.get("rollout_state_hash")
+                )
+                stale_reason = None
+                if not self.rollout_accepting_results:
+                    stale_reason = "not_accepting_results"
+                elif result.session_id != self.session_id:
+                    stale_reason = "session_mismatch"
+                elif result.round_id != self.current_round_id:
+                    stale_reason = "round_mismatch"
+                elif result.generation_id != self.rollout_generation:
+                    stale_reason = "generation_mismatch"
+                elif (
+                    result.posterior_revision
+                    != self.rollout_posterior_revision
+                ):
+                    stale_reason = "posterior_revision_mismatch"
+                elif record is None:
+                    stale_reason = "suggestion_not_found"
+                elif expected_hash != result.state_hash:
+                    stale_reason = "state_hash_mismatch"
+                elif any(count_desync.values()):
+                    stale_reason = "desync"
+                elif (
+                    not round_initialized
+                    or self.env is None
+                    or self.env.game_over
+                    or self.env.acting_player_position
+                    != self.my_position
+                ):
+                    stale_reason = "state_no_longer_actionable"
+
+                if stale_reason is not None:
+                    if record is not None:
+                        record["rollout_status"] = "stale_discarded"
+                        record["rollout_stale_reason"] = stale_reason
+                    persist_live_audit(
+                        "rollout_stale",
+                        {
+                            "suggestion_id": result.suggestion_id,
+                            "job_id": result.job_id,
+                            "status": result.status,
+                            "reason": stale_reason,
+                        },
+                    )
+                    continue
+
+                try:
+                    payload = json.loads(result.payload_json or "{}")
+                except Exception:
+                    payload = {}
+
+                record["rollout_status"] = result.status
+                record["rollout"] = payload
+                record["rollout_error"] = result.error
+
+                candidates = payload.get("candidates", [])
+                if candidates:
+                    parts = []
+                    for item in candidates:
+                        action = item.get("action")
+                        shown_action = (
+                            "不出"
+                            if action == "Pass"
+                            else display_cards(action)
+                        )
+                        parts.append(
+                            f"{shown_action}:整局值"
+                            f"{item.get('rollout_value', 0):.0%}/"
+                            f"终局{item.get('terminal_ratio', 0):.0%}/"
+                            f"控权{item.get('control_share', 0):.0%}"
+                        )
+                    print(
+                        "走向评估[后台] >>> "
+                        + " | ".join(parts)
+                        + f" [状态{result.status}，世界"
+                        f"{payload.get('worlds_completed', 0)}，"
+                        f"{payload.get('elapsed_seconds', 0):.2f}s]"
+                    )
+
+                persist_live_audit(
+                    "rollout",
+                    {
+                        "suggestion_id": result.suggestion_id,
+                        "job_id": result.job_id,
+                        "status": result.status,
+                    },
+                )
+
+        def schedule_rollout(
+            suggestion_record,
+            final_action,
+            raw_actions,
+            ess_ratio,
+        ):
+            if (
+                self.rollout_service is None
+                or self.hand_inference is None
+                or not self.current_round_id
+                or not self.rollout_accepting_results
+                or any(count_desync.values())
+                or ess_ratio < self.config.rollout_min_ess_ratio
+            ):
+                return False
+
+            # Long shadow experiments start only after at least one live audit
+            # revision is durably visible.
+            if not self.audit_writer.is_persisted(
+                self.current_round_id,
+                1,
+            ):
+                suggestion_record["rollout_status"] = (
+                    "skipped_no_audit_checkpoint"
+                )
+                return False
+
+            worlds = self.hand_inference.posterior_worlds(
+                self.config.rollout_max_worlds,
+                allow_infer=False,
+            )
+            if not worlds:
+                suggestion_record["rollout_status"] = (
+                    "skipped_no_posterior_cache"
+                )
+                return False
+
+            candidates = []
+            for action in [final_action] + [
+                item[0] for item in raw_actions[:3]
+            ]:
+                action = str(action)
+                if action not in candidates:
+                    candidates.append(action)
+                if len(candidates) >= 3:
+                    break
+
+            public_snapshot = snapshot_public_env(
+                self.env,
+                self.my_position,
+            )
+            hash_payload = {
+                "public": public_snapshot,
+                "candidates": candidates,
+                "posterior_revision": self.rollout_posterior_revision,
+            }
+            state_hash = hashlib.sha256(
+                json.dumps(
+                    hash_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+
+            job_id = uuid.uuid4().hex
+            suggestion_record["rollout_state_hash"] = state_hash
+            suggestion_record["rollout_job_id"] = job_id
+            suggestion_record["rollout_status"] = "submitted"
+
+            job = RolloutJob(
+                session_id=self.session_id,
+                round_id=self.current_round_id,
+                generation_id=self.rollout_generation,
+                posterior_revision=self.rollout_posterior_revision,
+                job_id=job_id,
+                suggestion_id=suggestion_record["suggestion_id"],
+                state_hash=state_hash,
+                created_at_utc=(
+                    datetime.utcnow().isoformat(timespec="milliseconds")
+                    + "Z"
+                ),
+                created_monotonic=time.monotonic(),
+                public_snapshot_json=json.dumps(
+                    public_snapshot,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                worlds_json=json.dumps(
+                    worlds,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                candidates=tuple(candidates),
+                my_position=self.my_position,
+                posterior_ess_ratio=float(ess_ratio),
+                model_paths=tuple(sorted(self.model_path_dict.items())),
+                max_worlds=self.config.rollout_max_worlds,
+                min_worlds=self.config.rollout_min_worlds,
+                max_steps=self.config.rollout_max_steps,
+                time_budget_seconds=(
+                    self.config.rollout_time_budget_seconds
+                ),
+                max_job_age_seconds=(
+                    self.config.rollout_max_job_age_seconds
+                ),
+                device=self.config.rollout_device,
+                cpu_threads=self.config.rollout_cpu_threads,
+            )
+            submitted = self.rollout_service.submit(job)
+            if not submitted:
+                suggestion_record["rollout_status"] = "submit_failed"
+            return submitted
+
+        self._live_audit_hook = persist_live_audit
 
         def emit_remaining_counts():
             result = {}
