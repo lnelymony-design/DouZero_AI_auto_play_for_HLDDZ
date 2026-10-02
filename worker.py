@@ -29,6 +29,7 @@ from constants import RealCard2EnvCard, EnvCard2RealCard, AllEnvCard, AutomaticM
 from utils import remove_chars_from_string
 from inference import HandInferenceEngine
 from inference.decision_policy import choose_recommendation
+from inference.inference_service import InferenceJob, InferenceService
 from inference.rollout import snapshot_public_env
 from inference.rollout_service import RolloutJob, RolloutService
 from runtime_audit import LiveAuditWriter
@@ -117,6 +118,7 @@ class WorkerThread(QThread):
         self.hand_inference = None
         self.last_hand_inference_result = None
         self.last_inference_duration_seconds = 0.0
+        self.last_inference_generation = None
         self.last_douzero_duration_seconds = 0.0
         self.last_rollout_export_duration_seconds = 0.0
 
@@ -129,6 +131,8 @@ class WorkerThread(QThread):
             'landlord_down': "baselines/resnet/resnet_landlord_down.ckpt"
         }
         self.ai_agent_cache = {}
+        self.inference_service = None
+        self.inference_service_init_failed = False
         self.rollout_service = None
         self.rollout_service_init_failed = False
         self.session_id = uuid.uuid4().hex
@@ -151,6 +155,14 @@ class WorkerThread(QThread):
             self.loop.run_until_complete(self.run_task())
         finally:
             self.rollout_accepting_results = False
+            if self.inference_service is not None:
+                try:
+                    self.inference_service.stop(
+                        self.config.inference_shutdown_timeout_seconds
+                    )
+                except Exception as exc:
+                    print(f"后台推牌服务停止失败: {exc}")
+                self.inference_service = None
             if self.rollout_service is not None:
                 try:
                     self.rollout_service.stop(
@@ -261,6 +273,7 @@ class WorkerThread(QThread):
         suggestion_seq = 0
         active_suggestion_id = None
         inference_dirty = False
+        inference_jobs = {}
         last_init_diag_signature = None
         last_init_diag_time = 0.0
         scene_blank_frames = 0
@@ -271,6 +284,7 @@ class WorkerThread(QThread):
         last_frame_gap_seconds = None
         max_frame_gap_seconds = 0.0
         last_audit_error_reported = None
+        last_inference_service_error_reported = None
         last_rollout_service_error_reported = None
 
         side_cycle = {"me": "right", "right": "left", "left": "me"}
@@ -378,6 +392,7 @@ class WorkerThread(QThread):
                 "observed_remaining": dict(observed_remaining),
                 "count_desync": dict(count_desync),
                 "inference": self.last_hand_inference_result,
+                "inference_generation": self.last_inference_generation,
                 "douzero_history": [
                     {
                         "player": player,
@@ -418,6 +433,11 @@ class WorkerThread(QThread):
                         self.last_rollout_export_duration_seconds
                     ),
                 },
+                "inference_service": (
+                    None
+                    if self.inference_service is None
+                    else self.inference_service.status()
+                ),
                 "rollout_service": (
                     None
                     if self.rollout_service is None
@@ -484,6 +504,11 @@ class WorkerThread(QThread):
 
         def bump_generation(reason):
             self.rollout_generation += 1
+            if self.inference_service is not None:
+                self.inference_service.invalidate(
+                    self.rollout_generation,
+                    reason=reason,
+                )
             if self.rollout_service is not None:
                 self.rollout_service.invalidate(
                     self.rollout_generation,
@@ -689,16 +714,28 @@ class WorkerThread(QThread):
             final_action,
             raw_actions,
             ess_ratio,
+            worlds_override=None,
         ):
             export_started = time.perf_counter()
             if (
                 self.rollout_service is None
-                or self.hand_inference is None
                 or not self.current_round_id
                 or not self.rollout_accepting_results
                 or any(count_desync.values())
-                or ess_ratio < self.config.rollout_min_ess_ratio
             ):
+                return False
+
+            if ess_ratio < self.config.rollout_min_ess_ratio:
+                suggestion_record["rollout_status"] = "skipped_low_ess"
+                return False
+
+            # With async inference, the immediate DouZero recommendation is
+            # deliberately emitted before posterior sampling finishes.
+            if (
+                self.config.inference_async_enabled
+                and worlds_override is None
+            ):
+                suggestion_record["rollout_status"] = "waiting_inference"
                 return False
 
             # Long shadow experiments start only after at least one live audit
@@ -712,10 +749,15 @@ class WorkerThread(QThread):
                 )
                 return False
 
-            worlds = self.hand_inference.posterior_worlds(
-                self.config.rollout_max_worlds,
-                allow_infer=False,
-            )
+            if worlds_override is not None:
+                worlds = list(worlds_override)
+            elif self.hand_inference is not None:
+                worlds = self.hand_inference.posterior_worlds(
+                    self.config.rollout_max_worlds,
+                    allow_infer=False,
+                )
+            else:
+                worlds = []
             if not worlds:
                 suggestion_record["rollout_status"] = (
                     "skipped_no_posterior_cache"
@@ -842,6 +884,376 @@ class WorkerThread(QThread):
 
         self._live_audit_hook = persist_live_audit
 
+        def schedule_inference():
+            if self.hand_inference is None or not self.current_round_id:
+                return False
+            if (
+                not self.rollout_accepting_results
+                or self.stop_requested_event.is_set()
+                or any(count_desync.values())
+            ):
+                return False
+
+            if not self.config.inference_async_enabled:
+                self.refresh_hand_inference()
+                return True
+
+            service = self._ensure_inference_service()
+            if service is None:
+                return False
+
+            record = next(
+                (
+                    item
+                    for item in reversed(suggestion_audit)
+                    if item.get("suggestion_id") == active_suggestion_id
+                    and item.get("generation_id")
+                    == self.rollout_generation
+                ),
+                None,
+            )
+            candidates = ()
+            if record is not None:
+                candidates = tuple(
+                    item["action"]
+                    for item in sorted(
+                        record.get("candidates", []),
+                        key=lambda item: item.get("model_rank", 999),
+                    )[:3]
+                )
+
+            state = {
+                "my_position": self.hand_inference.my_position,
+                "initial_my_hand": "".join(
+                    self.hand_inference.initial_my_hand
+                ),
+                "three_landlord_cards": "".join(
+                    self.hand_inference.three_landlord_cards
+                ),
+                "history": [
+                    [player, action]
+                    for player, action in self.hand_inference.history
+                ],
+                "sample_count": self.hand_inference.sample_count,
+                "pass_penalty": self.hand_inference.pass_penalty,
+                "friendly_pass_penalty": (
+                    self.hand_inference.friendly_pass_penalty
+                ),
+                "play_behavior_floor": (
+                    self.hand_inference.play_behavior_floor
+                ),
+                "play_behavior_strength": (
+                    self.hand_inference.play_behavior_strength
+                ),
+                "behavior_temperature": (
+                    self.hand_inference.behavior_temperature
+                ),
+                "min_effective_sample_ratio": (
+                    self.hand_inference.min_effective_sample_ratio
+                ),
+                "residual_behavior_floor": (
+                    self.hand_inference.residual_behavior_floor
+                ),
+                "residual_behavior_strength": (
+                    self.hand_inference.residual_behavior_strength
+                ),
+                "residual_behavior_temperature": (
+                    self.hand_inference.residual_behavior_temperature
+                ),
+                "random_seed": self.hand_inference.random_seed,
+            }
+            job_id = uuid.uuid4().hex
+            created = time.monotonic()
+            job = InferenceJob(
+                session_id=self.session_id,
+                round_id=self.current_round_id,
+                generation_id=self.rollout_generation,
+                job_id=job_id,
+                created_monotonic=created,
+                state_json=json.dumps(
+                    state,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+                candidates=candidates,
+                response_samples=(
+                    self.config.risk_adjustment_response_samples
+                ),
+                max_worlds=self.config.rollout_max_worlds,
+                max_job_age_seconds=(
+                    self.config.inference_max_job_age_seconds
+                ),
+            )
+            dispatch_id = service.submit(job)
+            if dispatch_id is None:
+                persist_live_audit(
+                    "inference_failed",
+                    {"reason": "submit_failed"},
+                )
+                return False
+
+            inference_jobs[job_id] = {
+                "generation_id": self.rollout_generation,
+                "dispatch_id": dispatch_id,
+                "service_epoch": service.service_epoch,
+                "created_monotonic": created,
+            }
+            persist_live_audit(
+                "inference_submitted",
+                {
+                    "job_id": job_id,
+                    "dispatch_id": dispatch_id,
+                    "generation_id": self.rollout_generation,
+                    "candidate_count": len(candidates),
+                },
+            )
+            return True
+
+        def drain_inference_results():
+            nonlocal last_inference_service_error_reported
+            if self.inference_service is None:
+                return
+
+            service_status = self.inference_service.status()
+            service_error = service_status.get("fatal_error")
+            if (
+                service_error
+                and service_error
+                != last_inference_service_error_reported
+            ):
+                print(
+                    "后台推牌服务已降级关闭 >>> "
+                    f"{service_error}"
+                )
+                last_inference_service_error_reported = service_error
+            elif not service_error:
+                last_inference_service_error_reported = None
+
+            for result in self.inference_service.drain_results(8):
+                meta = inference_jobs.pop(result.job_id, None)
+                stale_reason = None
+                if not self.rollout_accepting_results:
+                    stale_reason = "not_accepting_results"
+                elif result.service_epoch != self.inference_service.service_epoch:
+                    stale_reason = "service_epoch_mismatch"
+                elif meta is None:
+                    stale_reason = "job_not_found"
+                elif meta.get("dispatch_id") != result.dispatch_id:
+                    stale_reason = "dispatch_id_mismatch"
+                elif result.session_id != self.session_id:
+                    stale_reason = "session_mismatch"
+                elif result.round_id != self.current_round_id:
+                    stale_reason = "round_mismatch"
+                elif result.generation_id != self.rollout_generation:
+                    stale_reason = "generation_mismatch"
+                elif any(count_desync.values()):
+                    stale_reason = "desync"
+
+                if result.status != "ok" or stale_reason is not None:
+                    reason = stale_reason or result.status
+                    event_type = (
+                        "inference_stale"
+                        if result.status in (
+                            "cancelled",
+                            "superseded",
+                            "expired",
+                        )
+                        or stale_reason is not None
+                        else "inference_failed"
+                    )
+                    persist_live_audit(
+                        event_type,
+                        {
+                            "job_id": result.job_id,
+                            "dispatch_id": result.dispatch_id,
+                            "status": result.status,
+                            "reason": reason,
+                            "error": result.error,
+                        },
+                    )
+                    continue
+
+                try:
+                    payload = json.loads(result.payload_json or "{}")
+                except Exception as exc:
+                    persist_live_audit(
+                        "inference_failed",
+                        {
+                            "job_id": result.job_id,
+                            "reason": "invalid_result_json",
+                            "error": repr(exc),
+                        },
+                    )
+                    continue
+
+                inference_result = payload.get("inference") or {}
+                worlds = payload.get("worlds") or []
+                profiles = payload.get("profiles") or {}
+                self.last_inference_duration_seconds = float(
+                    payload.get("elapsed_seconds", 0.0) or 0.0
+                )
+                self.last_hand_inference_result = inference_result
+                self.last_inference_generation = result.generation_id
+                self.rollout_posterior_revision += 1
+                self.hand_inference_signal.emit(inference_result)
+
+                summary = HandInferenceEngine.compact_summary(
+                    inference_result
+                )
+                if summary:
+                    print(
+                        "推牌[后台] >>> "
+                        + summary
+                        + f" [{self.last_inference_duration_seconds:.2f}s]"
+                    )
+
+                record = next(
+                    (
+                        item
+                        for item in reversed(suggestion_audit)
+                        if item.get("suggestion_id")
+                        == active_suggestion_id
+                        and item.get("generation_id")
+                        == result.generation_id
+                    ),
+                    None,
+                )
+                if record is not None:
+                    ess_ratio = float(
+                        inference_result.get(
+                            "effective_sample_ratio", 0.0
+                        )
+                        or 0.0
+                    )
+                    record["ess_ratio"] = ess_ratio
+                    left_player = player_for_side("left")
+                    right_player = player_for_side("right")
+
+                    for candidate in record.get("candidates", []):
+                        action = candidate.get("action")
+                        profile = profiles.get(action)
+                        candidate["response_profile"] = profile
+                        candidate["response_pressure"] = (
+                            None
+                            if profile is None
+                            else profile.get("pressure")
+                        )
+                        player_profiles = (
+                            {} if profile is None
+                            else profile.get("players", {})
+                        )
+                        candidate["physical_sides"] = {
+                            "left": {
+                                "player": left_player,
+                                "profile": player_profiles.get(left_player),
+                            },
+                            "right": {
+                                "player": right_player,
+                                "profile": player_profiles.get(right_player),
+                            },
+                        }
+
+                    raw_action = record.get("raw_top", {}).get("action")
+                    raw_profile = profiles.get(raw_action)
+                    if raw_profile is not None:
+                        record["raw_top"]["response_risk"] = (
+                            raw_profile.get("can_beat")
+                        )
+                        record["raw_top"]["response_pressure"] = (
+                            raw_profile.get("pressure")
+                        )
+                        record["raw_top"]["response_profile"] = raw_profile
+
+                    final_action = record.get(
+                        "adjusted_top", {}
+                    ).get("action")
+                    final_profile = profiles.get(final_action)
+                    if final_profile is not None:
+                        record["adjusted_top"]["response_risk"] = (
+                            final_profile.get("can_beat")
+                        )
+                        record["adjusted_top"]["response_pressure"] = (
+                            final_profile.get("pressure")
+                        )
+
+                    if self.action_list:
+                        refreshed = []
+                        for row in self.action_list:
+                            action_text = row[0]
+                            score_text = row[1]
+                            model_rank = row[7]
+                            profile = profiles.get(action_text)
+                            players = (
+                                {} if profile is None
+                                else profile.get("players", {})
+                            )
+                            left_profile = players.get(left_player)
+                            right_profile = players.get(right_player)
+
+                            def pct(item, key):
+                                return (
+                                    "-"
+                                    if item is None
+                                    else f"{item[key]:.0%}"
+                                )
+
+                            refreshed.append((
+                                action_text,
+                                score_text,
+                                (
+                                    "-"
+                                    if profile is None
+                                    else f"{profile['can_beat']:.0%}"
+                                ),
+                                pct(left_profile, "ordinary_beat"),
+                                pct(left_profile, "bomb_only"),
+                                pct(right_profile, "ordinary_beat"),
+                                pct(right_profile, "bomb_only"),
+                                model_rank,
+                            ))
+                        self.action_list = refreshed
+                        self.ai_suggestion_signal.emit(self.action_list)
+
+                    if record.get("rollout_status") == "waiting_inference":
+                        raw_actions = [
+                            (
+                                item["action"],
+                                float(item["model_score"]),
+                            )
+                            for item in sorted(
+                                record.get("candidates", []),
+                                key=lambda item: item.get(
+                                    "model_rank", 999
+                                ),
+                            )
+                        ]
+                        schedule_rollout(
+                            record,
+                            final_action,
+                            raw_actions,
+                            ess_ratio,
+                            worlds_override=worlds,
+                        )
+
+                persist_live_audit(
+                    "inference_completed",
+                    {
+                        "job_id": result.job_id,
+                        "dispatch_id": result.dispatch_id,
+                        "elapsed_seconds": (
+                            self.last_inference_duration_seconds
+                        ),
+                        "samples": inference_result.get("samples"),
+                        "effective_sample_ratio": (
+                            inference_result.get(
+                                "effective_sample_ratio"
+                            )
+                        ),
+                        "worlds": len(worlds),
+                    },
+                )
+
         def observe_hand_inference_action(player, cards):
             nonlocal inference_dirty
             if self.hand_inference is None:
@@ -862,7 +1274,7 @@ class WorkerThread(QThread):
             if not inference_dirty:
                 return
             inference_dirty = False
-            self.refresh_hand_inference()
+            schedule_inference()
 
         def emit_remaining_counts():
             result = {}
@@ -927,9 +1339,11 @@ class WorkerThread(QThread):
                 pause_douzero("等待对手出牌与剩余张数完成匹配")
                 return
             if self.env is None or self.env.game_over:
+                active_suggestion_id = None
                 self.ai_suggestion_signal.emit([])
                 return
             if self.env.acting_player_position != self.my_position:
+                active_suggestion_id = None
                 self.ai_suggestion_signal.emit([])
                 return
 
@@ -949,7 +1363,12 @@ class WorkerThread(QThread):
                     douzero_paused_reason = None
                     return
 
-                inference_result = self.last_hand_inference_result or {}
+                inference_result = (
+                    self.last_hand_inference_result
+                    if self.last_inference_generation
+                    == self.rollout_generation
+                    else {}
+                ) or {}
                 ess_ratio = float(
                     inference_result.get("effective_sample_ratio", 0.0) or 0.0
                 )
@@ -1003,6 +1422,10 @@ class WorkerThread(QThread):
 
                 left_player = player_for_side("left")
                 right_player = player_for_side("right")
+                use_sync_profiles = (
+                    self.hand_inference is not None
+                    and not self.config.inference_async_enabled
+                )
                 profile_by_action = {}
                 enriched_by_action = {}
                 audit_candidates = []
@@ -1010,7 +1433,7 @@ class WorkerThread(QThread):
                 for action_text, score_text in display_pairs:
                     model_rank = raw_model_rank.get(action_text, 999)
                     profile = None
-                    if self.hand_inference is not None and action_text != "Pass":
+                    if use_sync_profiles and action_text != "Pass":
                         try:
                             profile = self.hand_inference.response_profile(
                                 action_text,
@@ -1091,7 +1514,7 @@ class WorkerThread(QThread):
                             profile = self.hand_inference.response_profile(
                                 action_text,
                                 max_samples=self.config.risk_adjustment_response_samples,
-                            ) if self.hand_inference is not None else None
+                            ) if use_sync_profiles else None
                         except Exception as risk_exc:
                             print(f"候选压力计算失败: {risk_exc}")
                             profile = None
@@ -1123,7 +1546,10 @@ class WorkerThread(QThread):
                 decision = choose_recommendation(
                     policy_candidates,
                     ess_ratio=ess_ratio,
-                    enabled=self.config.risk_adjustment_enabled,
+                    enabled=(
+                        self.config.risk_adjustment_enabled
+                        and use_sync_profiles
+                    ),
                     min_ess_ratio=self.config.risk_adjustment_min_ess_ratio,
                     min_risk_gain=self.config.risk_adjustment_min_risk_gain,
                     max_model_gap_fraction=(
@@ -1581,6 +2007,9 @@ class WorkerThread(QThread):
             douzero_players = None
             douzero_paused_reason = None
             active_suggestion_id = None
+            inference_jobs.clear()
+            self.last_hand_inference_result = None
+            self.last_inference_generation = None
             self.env = None
             self.hand_inference = None
             self.current_round_id = None
@@ -1613,6 +2042,8 @@ class WorkerThread(QThread):
             active_suggestion_id = None
             inference_dirty = False
             self.rollout_accepting_results = True
+            self.last_hand_inference_result = None
+            self.last_inference_generation = None
             bump_generation("round_init")
 
             self.my_hand_cards = my_hand
@@ -1659,6 +2090,7 @@ class WorkerThread(QThread):
                 self.initOtherPlayerHandCards()
                 self.initAllPlayerCardData()
                 self.create_ai_representer()
+                self._ensure_inference_service()
                 self._ensure_rollout_service()
                 douzero_players = self.env.players
                 douzero_initial_data = {
@@ -1722,7 +2154,7 @@ class WorkerThread(QThread):
                     "position_code": position_code,
                 },
             )
-            self.refresh_hand_inference()
+            inference_dirty = True
 
         def pending_self_change(raw_hand):
             if not round_initialized or not confirmed_my_hand or not raw_hand:
@@ -1760,6 +2192,7 @@ class WorkerThread(QThread):
                 self.worker_runing = False
                 break
 
+            drain_inference_results()
             drain_rollout_results()
             screenshot, _ = await self.screenHelper.getScreenshot()
             if screenshot is None:
@@ -2528,13 +2961,14 @@ class WorkerThread(QThread):
                 # Commit the frame as one coherent public state. Several
                 # inferred Pass/actions in one screenshot produce one posterior
                 # refresh and one suggestion/rollout job for the final state.
-                flush_frame_inference()
                 if self.rollout_generation != frame_generation_start:
                     emit_douzero_suggestion_if_my_turn()
+                flush_frame_inference()
 
             except Exception as exc:
                 print(f"微信牌局接入异常（不会退出线程）: {exc}")
 
+            drain_inference_results()
             drain_rollout_results()
             await asyncio.sleep(0.35)
 
@@ -2732,6 +3166,8 @@ class WorkerThread(QThread):
         self.action_message = None
         self.action_list = None
         self.hand_inference = None
+        self.last_hand_inference_result = None
+        self.last_inference_generation = None
 
     def reset_ui_status(self):
         self.card_recorder_signal.emit('')
@@ -3254,6 +3690,36 @@ class WorkerThread(QThread):
             agent = DeepAgent(position, self.model_path_dict[position])
             self.ai_agent_cache[position] = agent
         return agent
+
+    def _ensure_inference_service(self):
+        if not getattr(self.config, "inference_async_enabled", False):
+            return None
+        if self.inference_service is not None:
+            return self.inference_service
+        if self.inference_service_init_failed:
+            return None
+
+        try:
+            self.inference_service = InferenceService(
+                shutdown_timeout=(
+                    self.config.inference_shutdown_timeout_seconds
+                ),
+            )
+            print(
+                "后验推牌后台服务启动中 >>> "
+                f"samples={self.config.inference_sample_count} "
+                "latest-state-wins"
+            )
+            return self.inference_service
+        except Exception as exc:
+            self.inference_service_init_failed = True
+            self.inference_service = None
+            print(
+                "后验推牌后台服务初始化失败，"
+                "保留DouZero但不阻塞识牌: "
+                f"{exc}"
+            )
+            return None
 
     def _ensure_rollout_service(self):
         if not getattr(self.config, "rollout_enabled", False):
